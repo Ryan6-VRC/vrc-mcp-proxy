@@ -56,7 +56,8 @@ hidden tool later needed is a one-line allowlist edit.
 | Retires | Owner behavior |
 |---|---|
 | CLAUDE.md `execute_code` method-body standing line | F37 corrective refusal |
-| unity.md §Sharp edges: F37 block, MACS/DestroyBlendTree noise, FBX reimport noise, F9 substring note | F37 refusal + console-strip |
+| unity.md §Sharp edges: F37 block, MACS/DestroyBlendTree noise, F9 substring note | F37 refusal + console-strip |
+| — (nothing; the FBX importer "inconsistent result" strip retires no standing doc line — that noise came from an assay kickoff, not a doc. Kept to spare re-triage of known importer noise.) | console-strip (FBX predicate) |
 | unity.md §MCP unpinned-routing bullet + CLAUDE.md session-start pin reminder wording + instance-pinning memory | upstream fix (live-confirmed) |
 | `.claude/settings.json` run_tests PreToolUse deny hook + bootstrap.md §run_tests-is-blocked | allowlist hide |
 | "re-list the destination" / verify-on-disk sharp-edge lines *stay* (doctrine the proxy can't subsume) | — |
