@@ -9,10 +9,13 @@ The patterns are string-keyed and therefore invisible to the schema canary: the
 version-bump runbook (docs/bump-runbook.md) re-validates every one against the upstream
 Unity / VRCFury source.
 
-Assumed get-response shape: payload.data is a list of log entries, or payload.data.<lines
-|logs|entries|messages> is, or payload itself is the list. Each entry carries a message
-and (optionally) a stack trace under one of the common key spellings below. If the shape
-is unrecognized the strip is a safe no-op (nothing dropped, no trailer).
+Live get-response shapes (verified against 10.1.0): the default/plain format's
+payload.data is a list of PLAIN STRINGS with Unity rich-text markup embedded, e.g.
+"<color=#007076>[MACS]</color>: <color=#f0f0f0>Applying patches</color>" — substring
+matching still works against the raw string. Detailed/json formats carry dicts with a
+message and (optionally) a stack trace under one of the common key spellings below; the
+list may also live at payload.data.<lines|logs|entries|messages> or payload itself. If
+the shape is unrecognized the strip is a safe no-op (nothing dropped, no trailer).
 """
 import json
 
@@ -20,7 +23,9 @@ from ..envelope import first_text_payload
 
 
 def _p_macs(m, s):
-    return "[MACS]" in m and "Failed to apply patch" in m
+    # ALL [MACS] lines are third-party load noise (com.mcardellje.macs): both the
+    # Error-typed "Failed to apply patch" and load chatter like "Applying patches".
+    return "[MACS]" in m
 
 
 def _p_blendtree(m, s):
@@ -39,7 +44,7 @@ def _p_vrcfury_progress(m, s):
 
 # One data structure; the bump runbook re-validates each predicate against upstream source.
 BENIGN_PATTERNS = (
-    ("MACS patch-apply noise", _p_macs),
+    ("MACS third-party load noise", _p_macs),
     ("DestroyBlendTreeRecursive", _p_blendtree),
     ("FBX importer inconsistent-result noise", _p_fbx),
     ("VRCFury build-progress mis-tagged as error", _p_vrcfury_progress),
@@ -77,15 +82,18 @@ def _locate_entries(payload):
 
 
 def _trailer_entry(counts, sample):
+    """One trailer entry, shaped like the entries around it (plain string for the
+    default/plain format's string list, dict for detailed/json formats)."""
     total = sum(counts.values())
     detail = ", ".join(f"{label}: {n}" for label, n in counts.items() if n)
+    if not isinstance(sample, dict):
+        return f"[vrc-mcp-proxy] stripped {total} known-benign console lines ({detail})"
     text = f"[vrc-mcp-proxy] stripped {total} benign console line(s) — {detail}"
     entry = {"type": "Log", "logType": "Log", "message": text, "stackTrace": ""}
     # Mirror the sample entry's key spelling so the client renders it.
-    if isinstance(sample, dict):
-        for k in _MSG_KEYS:
-            if k in sample:
-                entry[k] = text
+    for k in _MSG_KEYS:
+        if k in sample:
+            entry[k] = text
     return entry
 
 

@@ -62,6 +62,11 @@ def correct_response(msg, arguments, active_instance, directory=None):
         moved = os.path.exists(dst_abs) and not os.path.exists(src_abs)
         if moved:
             payload["success"] = True
+            # A success:true payload must not keep live error/code keys — that shape
+            # invites misreading. Preserve the upstream strings under upstream_* instead.
+            for key in ("error", "code"):
+                if key in payload:
+                    payload[f"upstream_{key}"] = payload.pop(key)
             payload["proxy_note"] = (
                 f"upstream reported failure but the move succeeded on disk "
                 f"(verified {src_rel} -> {dst_rel})"

@@ -45,10 +45,11 @@ in one commit.
 5. **Re-validate the string-keyed transforms against upstream source.**
    - `TIMEOUT_MARKERS` — grep the upstream Python `send_command`/transport for the timeout
      message strings; update if reworded.
-   - `BENIGN_PATTERNS` — re-check each predicate (MACS patch-apply, DestroyBlendTreeRecursive,
+   - `BENIGN_PATTERNS` — re-check each predicate (any `[MACS]` line, DestroyBlendTreeRecursive,
      FBX inconsistent-result, VRCFury `VF.Exceptions` progress mis-tag) against current Unity
      / VRCFury output. Confirm read_console's get-response shape still matches
-     `read_console.py::_locate_entries` assumptions (payload.data list of entries with
+     `read_console.py::_locate_entries` assumptions (default/plain format: payload.data is a
+     list of plain strings with rich-text markup; detailed/json: dict entries with
      message/stackTrace keys); adjust if the envelope changed.
 
 6. **Commit baseline + strings together.** One commit carrying the new baseline JSON, the

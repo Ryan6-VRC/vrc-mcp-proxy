@@ -7,7 +7,9 @@ from vrc_mcp_proxy.transforms import manage_asset
 
 
 def _failure_msg(payload=None):
-    payload = payload or {"success": False, "error": "MoveAsset call failed unexpectedly"}
+    payload = payload or {"success": False,
+                          "error": "MoveAsset call failed unexpectedly",
+                          "code": "MoveAsset call failed unexpectedly"}
     return {"jsonrpc": "2.0", "id": 1, "result": {
         "content": [{"type": "text", "text": json.dumps(payload)}], "isError": False}}
 
@@ -39,6 +41,11 @@ def test_moved_in_fact_is_corrected(project):
     p = _payload(out)
     assert p["success"] is True
     assert "succeeded on disk" in p["proxy_note"]
+    # No live error/code keys may remain on a success-rewritten response; the upstream
+    # strings move to upstream_* instead.
+    assert "error" not in p and "code" not in p
+    assert p["upstream_error"] == "MoveAsset call failed unexpectedly"
+    assert p["upstream_code"] == "MoveAsset call failed unexpectedly"
 
 
 def test_genuine_failure_stays_failed(project):
