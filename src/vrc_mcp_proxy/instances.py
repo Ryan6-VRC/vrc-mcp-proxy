@@ -64,7 +64,10 @@ def resolve_project_root(per_call_instance, active_instance, directory=None):
     selector = per_call_instance or active_instance
     if selector is None:
         return heartbeats[0]["project_root"] if len(heartbeats) == 1 else None
-    for hb in heartbeats:
-        if _selects(hb, selector):
-            return hb["project_root"]
+    # A hash-prefix selector can match >1 Editor. Returning the first would disk-verify the
+    # WRONG project and could falsely truth-correct a genuine failure — so resolve only when
+    # exactly one heartbeat matches; otherwise leave it unresolved (caller says so).
+    matches = [hb for hb in heartbeats if _selects(hb, selector)]
+    if len(matches) == 1:
+        return matches[0]["project_root"]
     return None

@@ -47,6 +47,32 @@ def test_guard_skipped_for_yield_and_await():
         assert payload["code"] == snippet  # passed through unwrapped
 
 
+def test_guard_erases_key_and_rethrows_on_exception():
+    # A throwing snippet must not leave the guard key at "running": the wrap runs the body
+    # in try { } catch { EraseString; throw; } so a transport retry actually re-runs
+    # instead of reporting "duplicate-suppressed ... first run: running".
+    code = ec.wrap_idempotent("return 1;", guid="vrcproxy:fixed")
+    assert "try {" in code
+    assert "catch { UnityEditor.SessionState.EraseString(__a10k); throw; }" in code
+    # the completion SetString runs only after the try succeeds (outside the catch)
+    assert code.index("catch {") < code.index('SetString(__a10k, __a10r == null')
+
+
+def test_bare_return_passes_through_unwrapped():
+    # A void `return;` inside the Func<object> lambda is CS0126 — skip the wrap.
+    action, payload = ec.transform_request(
+        {"action": "execute", "code": "if (x) return; DoThing();"}, CFG)
+    assert action == "forward"
+    assert payload["code"] == "if (x) return; DoThing();"
+
+
+def test_return_with_expression_is_wrapped():
+    action, payload = ec.transform_request(
+        {"action": "execute", "code": "return 42;"}, CFG, guid="vrcproxy:fixed")
+    assert action == "forward"
+    assert "System.Func<object>" in payload["code"]  # wrapped, not passed through
+
+
 def test_non_execute_action_untouched():
     args = {"action": "get_history", "limit": 5}
     action, payload = ec.transform_request(args, CFG)

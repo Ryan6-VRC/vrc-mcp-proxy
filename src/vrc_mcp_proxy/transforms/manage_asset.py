@@ -20,14 +20,51 @@ def is_move_call(arguments):
     return isinstance(arguments, dict) and arguments.get("action") in _MOVE_ACTIONS
 
 
+def _normalize_asset_rel(asset_path):
+    """Coerce an upstream asset path to an Assets-relative one, or None if it can't be.
+
+    Upstream accepts prefix-less paths (`Materials/My.mat` — the baseline schema's own
+    example), so we strip leading separators and prepend `Assets/` when the path isn't
+    already under it. Absolute / drive-qualified paths are unverifiable (not corrected):
+    return None so the caller appends a note rather than rewriting.
+    """
+    if not asset_path:
+        return None
+    if os.path.isabs(asset_path):
+        return None
+    p = asset_path.replace("\\", "/")
+    if ":" in p.split("/", 1)[0]:  # drive-qualified (e.g. C:/...)
+        return None
+    p = p.lstrip("/")
+    if not p:
+        return None
+    if p.split("/", 1)[0] != "Assets":
+        p = "Assets/" + p
+    return p
+
+
 def _resolve_asset_path(project_root, asset_path):
-    # Asset paths are Assets-relative with forward slashes ("Assets/Foo/bar.mat").
-    return os.path.normpath(os.path.join(project_root, asset_path))
+    """Absolute on-disk path for an asset path, or None if it's unverifiable (absolute,
+    drive-qualified, or a traversal that escapes the project root)."""
+    rel = _normalize_asset_rel(asset_path)
+    if rel is None:
+        return None
+    abs_path = os.path.normpath(os.path.join(project_root, rel))
+    root_norm = os.path.normpath(project_root)
+    try:
+        if os.path.commonpath([abs_path, root_norm]) != root_norm:
+            return None  # traversal escaped the project — unverifiable
+    except ValueError:
+        return None  # different drives
+    return abs_path
 
 
 def _dest_path(src, destination):
-    # move: destination is a full Assets-relative path. rename: may be a bare new name,
-    # in which case it renames in place (sibling of src).
+    # move: destination is a full (possibly prefix-less) asset path. rename: may be a bare
+    # new name, renaming in place (sibling of src). Empty/missing destination has no target
+    # path to confirm -> None, so the caller treats the move as unverifiable, never rewrites.
+    if not destination:
+        return None
     if "/" in destination or destination.startswith("Assets"):
         return destination
     return os.path.dirname(src).replace("\\", "/") + "/" + destination
@@ -56,11 +93,20 @@ def correct_response(msg, arguments, active_instance, directory=None):
             "proxy could not verify on disk (no project root resolved from the "
             "~/.unity-mcp heartbeats; pin an instance with set_active_instance)."
         )
+    elif dst_rel is None:
+        payload["proxy_note"] = (
+            "proxy could not verify on disk: the move has no destination, so there is no "
+            "target path to confirm — the reported failure is left as-is (unverified)."
+        )
     else:
         src_abs = _resolve_asset_path(root, src_rel)
         dst_abs = _resolve_asset_path(root, dst_rel)
-        moved = os.path.exists(dst_abs) and not os.path.exists(src_abs)
-        if moved:
+        if src_abs is None or dst_abs is None:
+            payload["proxy_note"] = (
+                "proxy could not verify on disk: an asset path is absolute or escapes the "
+                "project (traversal) — unverifiable, the reported failure is left as-is."
+            )
+        elif os.path.exists(dst_abs) and not os.path.exists(src_abs):
             payload["success"] = True
             # A success:true payload must not keep live error/code keys — that shape
             # invites misreading. Preserve the upstream strings under upstream_* instead.

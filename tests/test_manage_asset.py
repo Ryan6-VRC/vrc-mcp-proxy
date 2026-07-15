@@ -78,6 +78,43 @@ def test_success_response_untouched(project):
     assert "proxy_note" not in _payload(out)
 
 
+def test_prefixless_move_corrected(project):
+    # Upstream accepts prefix-less asset paths ("Foo/a.mat"); the proxy must normalize to
+    # Assets/... before the disk check or it confidently reports a move that DID land as
+    # "did not occur".
+    root, hb = project
+    dst = root / "Assets" / "Bar" / "a.mat"
+    dst.parent.mkdir(parents=True)
+    dst.write_text("moved")
+    args = {"action": "move", "path": "Foo/a.mat", "destination": "Bar/a.mat"}
+    out = manage_asset.correct_response(_failure_msg(), args, None, directory=hb)
+    p = _payload(out)
+    assert p["success"] is True
+    assert "succeeded on disk" in p["proxy_note"]
+
+
+def test_traversal_path_is_unverifiable(project):
+    # An absolute/traversal path escapes the project — unverifiable, never truth-corrected.
+    root, hb = project
+    args = {"action": "move", "path": "../../../etc/passwd", "destination": "Bar/a.mat"}
+    out = manage_asset.correct_response(_failure_msg(), args, None, directory=hb)
+    p = _payload(out)
+    assert p["success"] is False
+    assert "could not verify" in p["proxy_note"]
+
+
+def test_empty_destination_is_unverifiable(project):
+    # Empty destination once resolved to the source's parent dir (which exists) -> a
+    # genuinely-failed move with a missing source got rewritten to success. Must not.
+    root, hb = project
+    # source is absent and destination is empty: no target path to confirm.
+    args = {"action": "move", "path": "Assets/Foo/a.mat", "destination": ""}
+    out = manage_asset.correct_response(_failure_msg(), args, None, directory=hb)
+    p = _payload(out)
+    assert p["success"] is False
+    assert "destination" in p["proxy_note"].lower()
+
+
 def test_is_move_call():
     assert manage_asset.is_move_call({"action": "move"})
     assert manage_asset.is_move_call({"action": "rename"})

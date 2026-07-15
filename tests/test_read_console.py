@@ -99,6 +99,32 @@ def test_macs_prefix_alone_strips():
     assert sum(counts.values()) == 1
 
 
+def test_plain_string_vrcfury_line_strips():
+    # Plain-string format: the whole line is the message, stack is "". The predicate must
+    # match the combined blob or it never fires for the dominant (plain) shape.
+    payload = {"data": [
+        "[VF.Exceptions] Progress (3/10) building the avatar",
+        "a real error the model must see",
+    ]}
+    out, counts = read_console.strip_payload(payload)
+    assert sum(counts.values()) == 1
+    assert "a real error the model must see" in out["data"]
+
+
+def test_fbx_predicate_requires_co_token():
+    # Bare "inconsistent result" from an unrelated subsystem must NOT be stripped; the FBX
+    # importer variant (with an fbx/import co-token) is.
+    payload = {"data": [
+        "inconsistent result from the netcode reconciler",   # keep — no co-token
+        "inconsistent result from FBX importer",             # strip
+    ]}
+    out, counts = read_console.strip_payload(payload)
+    kept = out["data"]
+    assert "inconsistent result from the netcode reconciler" in kept
+    assert "inconsistent result from FBX importer" not in kept  # stripped
+    assert sum(counts.values()) == 1
+
+
 def test_strip_response_rewrites_content():
     msg = {"jsonrpc": "2.0", "id": 1, "result": {"content": [
         {"type": "text", "text": json.dumps({"data": {"lines": _entries()}})}]}}

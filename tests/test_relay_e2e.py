@@ -77,6 +77,25 @@ def test_hidden_tool_call_refused_without_forwarding():
         child.terminate()
 
 
+def test_read_console_strip_fires_without_action_key():
+    # The schema defaults action to null, so the common call omits it. The strip gate must
+    # treat omitted action as "get" — a bug here silently bypasses the dominant call shape,
+    # invisible to the unit tests that call the strip functions directly.
+    proxy, child, sink = _proxy({"read_console_strip": True})
+    try:
+        proxy.handle_client_line(json.dumps(
+            {"jsonrpc": "2.0", "id": 4, "method": "tools/call",
+             "params": {"name": "read_console", "arguments": {}}}))  # no action key
+        resp = sink.wait_for_id(4)
+        payload = json.loads(resp["result"]["content"][0]["text"])
+        data = payload["data"]
+        assert "a real error" in data
+        assert not any("[MACS]" in x for x in data)
+        assert any("vrc-mcp-proxy" in x for x in data)  # strip trailer proves it fired
+    finally:
+        child.terminate()
+
+
 def test_allowed_tool_call_relays_through():
     proxy, child, sink = _proxy({"allowlist": True})
     try:

@@ -19,6 +19,7 @@ import threading
 from . import canary, config
 from .allowlist import filter_tools_list, is_allowed, refusal_result
 from .envelope import (
+    is_error_result,
     is_notification,
     is_request,
     tool_error_result,
@@ -33,7 +34,11 @@ class Proxy:
         self.client_out = client_out if client_out is not None else sys.stdout
         self.log = log if log is not None else (
             lambda m: print(m, file=sys.stderr, flush=True))
-        self.baseline_schemas = canary.load_baseline_schemas()
+        # Load the canary baseline only when the canary is enabled: with it disabled
+        # (VRC_MCP_PROXY_DISABLE=canary — the mid-bump repair path), a missing/corrupt
+        # baseline must not crash startup.
+        self.baseline_schemas = (
+            canary.load_baseline_schemas() if self.cfg.get("canary", True) else {})
         self.pending = {}          # request id -> {"method","tool","args"}
         self.active_instance = None
         self.drifted = set()
@@ -91,10 +96,6 @@ class Proxy:
         name = params.get("name")
         arguments = params.get("arguments") or {}
 
-        # Observe instance targeting (session default + per-call override live in args).
-        if name == "set_active_instance" and isinstance(arguments, dict):
-            self.active_instance = arguments.get("instance", self.active_instance)
-
         if self.cfg.get("allowlist", True) and not is_allowed(name):
             self._write_client(refusal_result(req_id, name))
             return
@@ -114,7 +115,16 @@ class Proxy:
             msg = dict(msg)
             msg["params"] = params
 
-        self._remember(req_id, "tools/call", name, arguments)
+        # Instance targeting: snapshot the currently-committed active instance into this
+        # request so the response thread verifies against the target as of request time
+        # (not whatever a later set_active_instance changed it to). A set_active_instance's
+        # own requested value is committed only when its response comes back successful.
+        requested_instance = (
+            arguments.get("instance")
+            if name == "set_active_instance" and isinstance(arguments, dict) else None)
+        self._remember(req_id, "tools/call", name, arguments,
+                       active_snapshot=self.active_instance,
+                       requested_instance=requested_instance)
         self._write_child(msg)
 
     # --- response path (child -> client) ----------------------------------
@@ -158,20 +168,35 @@ class Proxy:
 
     def _handle_call_response(self, msg, info):
         name, args = info["tool"], info["args"]
+        # Commit a set_active_instance only once its response comes back successful.
+        if name == "set_active_instance" and info.get("requested_instance") is not None \
+                and not is_error_result(msg):
+            self.active_instance = info["requested_instance"]
         if self.cfg.get("manage_asset_truth_correction", True) and \
                 name == "manage_asset" and manage_asset.is_move_call(args):
-            msg = manage_asset.correct_response(msg, args, self.active_instance)
+            msg = manage_asset.correct_response(msg, args, info.get("active"))
+        # action defaults to null in the schema, so the most common call omits it — treat
+        # omitted/None as "get" or the strip would skip the dominant call shape.
         if self.cfg.get("read_console_strip", True) and name == "read_console" and \
-                isinstance(args, dict) and args.get("action") == "get":
+                isinstance(args, dict) and args.get("action") in (None, "get"):
             msg = read_console.strip_response(msg)
         if self.cfg.get("timeout_notes", True):
             msg = timeouts.annotate(msg)
         return msg
 
     # --- pending-request bookkeeping --------------------------------------
-    def _remember(self, req_id, method, tool, args):
+    def _remember(self, req_id, method, tool, args,
+                  active_snapshot=None, requested_instance=None):
         with self._pending_lock:
-            self.pending[req_id] = {"method": method, "tool": tool, "args": args}
+            if req_id in self.pending:
+                self.log(
+                    f"[vrc-mcp-proxy] duplicate in-flight JSON-RPC id {req_id!r}; "
+                    f"clobbering the pending "
+                    f"{self.pending[req_id].get('method')} entry — a response may now be "
+                    f"mismatched. Upstream or client re-used an id.")
+            self.pending[req_id] = {"method": method, "tool": tool, "args": args,
+                                    "active": active_snapshot,
+                                    "requested_instance": requested_instance}
 
     def _take(self, req_id):
         with self._pending_lock:

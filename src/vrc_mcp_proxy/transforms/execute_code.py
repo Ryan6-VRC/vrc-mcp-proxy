@@ -27,13 +27,25 @@ def has_top_level_using(code):
     return bool(_USING_DIRECTIVE.search(code or ""))
 
 
+# A bare `return;` (no expression) inside the Func<object> lambda is CS0126 — the lambda
+# must return a value. Detect it (but not `return <expr>;`) and pass through unwrapped.
+_BARE_RETURN = re.compile(r"(?m)\breturn[ \t]*;")
+
+
 def _guard_incompatible(code):
-    # A plain lambda can't wrap iterator (`yield`) or async (`await`) bodies.
-    return "yield " in code or "await " in code
+    # A plain Func<object> lambda can't wrap iterator (`yield`) or async (`await`) bodies,
+    # nor a void `return;`.
+    return "yield " in code or "await " in code or bool(_BARE_RETURN.search(code))
 
 
 def wrap_idempotent(code, guid=None):
-    """Return the snippet wrapped in a minted-GUID SessionState check-and-set guard."""
+    """Return the snippet wrapped in a minted-GUID SessionState check-and-set guard.
+
+    The user body runs inside a try/catch that erases the guard key and rethrows on
+    exception: without it, a throwing snippet leaves the key at "running", and an upstream
+    transport re-delivery would then report `duplicate-suppressed … first run: running` —
+    swallowing the real exception. Erase-on-throw lets the retry actually re-run.
+    """
     guid = f"vrcproxy:{uuid.uuid4()}" if guid is None else guid
     return (
         f'var __a10k = "{guid}";\n'
@@ -41,8 +53,10 @@ def wrap_idempotent(code, guid=None):
         'if (__a10prev != "") return "[proxy-duplicate-suppressed] this delivery was a '
         'transport retry; first run: " + __a10prev;\n'
         'UnityEditor.SessionState.SetString(__a10k, "running");\n'
-        'object __a10r = ((System.Func<object>)(() => { ' + code + '\n'
-        'return null; }))();\n'
+        'object __a10r;\n'
+        'try { __a10r = ((System.Func<object>)(() => { ' + code + '\n'
+        'return null; }))(); }\n'
+        'catch { UnityEditor.SessionState.EraseString(__a10k); throw; }\n'
         'UnityEditor.SessionState.SetString(__a10k, __a10r == null ? "completed(null)" : '
         '"completed: " + __a10r.ToString());\n'
         'return __a10r;'

@@ -33,13 +33,18 @@ def _p_blendtree(m, s):
 
 
 def _p_fbx(m, s):
-    return "inconsistent result" in m
+    # Bare "inconsistent result" would eat unrelated errors — require an FBX/importer
+    # co-token in the combined blob.
+    blob = m + s
+    return "inconsistent result" in blob and ("fbx" in blob.lower() or "import" in blob.lower())
 
 
 def _p_vrcfury_progress(m, s):
     # VRCFury build-progress lines route through VF.Exceptions and get mis-tagged as
-    # errors; the message itself is a progress/import line.
-    return "VF.Exceptions" in s and (m.startswith("Progress (") or m.startswith("Importing "))
+    # errors. In the plain-string format the whole line is the message and stack is "",
+    # so match on the combined blob (not the stack alone, which was dead for plain lines).
+    blob = m + s
+    return "VF.Exceptions" in blob and ("Progress (" in blob or "Importing " in blob)
 
 
 # One data structure; the bump runbook re-validates each predicate against upstream source.

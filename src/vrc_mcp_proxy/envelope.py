@@ -27,6 +27,17 @@ def tool_error_result(req_id, text):
     }
 
 
+def is_error_result(msg):
+    """True if a response is a failure — a JSON-RPC `error` object or a tools/call result
+    flagged isError. Used to gate committing state on a successful response only."""
+    if not isinstance(msg, dict):
+        return True
+    if "error" in msg:
+        return True
+    res = msg.get("result")
+    return isinstance(res, dict) and bool(res.get("isError"))
+
+
 def result_content(msg):
     """The content list of a tools/call response, or None."""
     res = msg.get("result")

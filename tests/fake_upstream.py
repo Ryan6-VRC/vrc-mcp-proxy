@@ -31,6 +31,13 @@ def main():
             ]}})
         elif method == "tools/call":
             name = (msg.get("params") or {}).get("name")
+            if name == "read_console":
+                # A strippable console payload (one benign MACS line + one real line) so
+                # the relay's strip gate can be exercised end-to-end.
+                respond({"jsonrpc": "2.0", "id": rid, "result": {"content": [
+                    {"type": "text", "text": json.dumps({"success": True, "data": [
+                        "[MACS] Applying patches", "a real error"]})}], "isError": False}})
+                continue
             respond({"jsonrpc": "2.0", "id": rid, "result": {
                 "content": [{"type": "text", "text": json.dumps({"tool": name, "ok": True})}],
                 "isError": False}})
