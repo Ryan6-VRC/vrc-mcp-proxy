@@ -42,10 +42,21 @@ def wrap_idempotent(code, guid=None):
     build behind a modal re-ran 6x (measured 2026-07-16); the check protected nothing and
     only opened a fail-open.
 
-    The user body runs inside a try/catch that erases the guard key and rethrows on
-    exception: without it, a throwing snippet leaves the key at "running", and an upstream
-    transport re-delivery would then report `duplicate-suppressed … first run: running` —
-    swallowing the real exception. Erase-on-throw lets the retry actually re-run.
+    A THROWING snippet records its failure and rethrows — it must not erase the key. Erasing
+    re-arms the guard: the next queued copy reads "" and runs the body again, in full, so a
+    build that mutates state and then throws re-runs those mutations up to 6x — the exact
+    failure this guard exists to stop, on the path most likely to be behind a modal. Recording
+    "failed: <msg>" instead both stops the re-run AND hands the retry the real exception text
+    (`duplicate-suppressed … first run: failed: …`) rather than the useless "running" an
+    earlier version worried about. A deliberate agent re-run is unaffected: transform_request
+    mints a FRESH guid per tools/call, so retained failure state can never suppress an
+    intentional retry — only a transport re-delivery of this same wrapped payload.
+
+    The body starts on its OWN line: `{ ' + code` would glue a leading preprocessor directive
+    (`#region`, `#if UNITY_EDITOR`) onto the brace line — CS1040, "preprocessor directives must
+    appear as the first non-whitespace character on a line". The host template appends the
+    snippet with AppendLine, so such a snippet compiles unwrapped; gluing it would make the
+    wrap non-transparent for the one shape this docstring claims it is transparent for.
     """
     guid = f"vrcproxy:{uuid.uuid4()}" if guid is None else guid
     return (
@@ -55,9 +66,10 @@ def wrap_idempotent(code, guid=None):
         'transport retry; first run: " + __a10prev;\n'
         'UnityEditor.SessionState.SetString(__a10k, "running");\n'
         'object __a10r;\n'
-        'try { __a10r = ((System.Func<object>)(() => { ' + code + '\n'
+        'try { __a10r = ((System.Func<object>)(() => {\n' + code + '\n'
         'return null; }))(); }\n'
-        'catch { UnityEditor.SessionState.EraseString(__a10k); throw; }\n'
+        'catch (System.Exception __a10e) { UnityEditor.SessionState.SetString(__a10k, '
+        '"failed: " + __a10e.Message); throw; }\n'
         'UnityEditor.SessionState.SetString(__a10k, __a10r == null ? "completed(null)" : '
         '"completed: " + __a10r.ToString());\n'
         'return __a10r;'
