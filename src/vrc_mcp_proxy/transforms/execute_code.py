@@ -2,8 +2,9 @@
 
 Two behaviors, both request-side:
   * using-refusal: top-level `using` directives can't live in a method body; refuse loud.
-  * idempotency guard: wrap the snippet so an upstream transport re-send (which
+  * idempotency guard: wrap EVERY snippet so an upstream transport re-send (which
     re-executes — reproduced on 10.1.0) returns the cached result instead of running twice.
+    Unconditional by design: a snippet the guard skips is a snippet that runs N times.
 """
 import re
 import uuid
@@ -27,19 +28,19 @@ def has_top_level_using(code):
     return bool(_USING_DIRECTIVE.search(code or ""))
 
 
-# A bare `return;` (no expression) inside the Func<object> lambda is CS0126 — the lambda
-# must return a value. Detect it (but not `return <expr>;`) and pass through unwrapped.
-_BARE_RETURN = re.compile(r"(?m)\breturn[ \t]*;")
-
-
-def _guard_incompatible(code):
-    # A plain Func<object> lambda can't wrap iterator (`yield`) or async (`await`) bodies,
-    # nor a void `return;`.
-    return "yield " in code or "await " in code or bool(_BARE_RETURN.search(code))
-
-
 def wrap_idempotent(code, guid=None):
     """Return the snippet wrapped in a minted-GUID SessionState check-and-set guard.
+
+    EVERY execute snippet is wrapped — there is deliberately no compatibility escape.
+    The wrap adds exactly one thing: a Func<object> lambda around a body that already runs
+    as `object MCPDynamicCode.Execute()`. So the shapes a lambda rejects at top level
+    (`return;`, `yield`, `await`) are rejected by that host method too — such a snippet
+    never ran, wrapped or not, and skipping the wrap bought nothing. Nested occurrences —
+    a `return;` in a caller's void lambda, an `await` in their async lambda, a `yield` in
+    their iterator local function — nest inside the wrap untouched. An earlier substring
+    check for those three forwarded such snippets UNGUARDED and silently, which is how a
+    build behind a modal re-ran 6x (measured 2026-07-16); the check protected nothing and
+    only opened a fail-open.
 
     The user body runs inside a try/catch that erases the guard key and rethrows on
     exception: without it, a throwing snippet leaves the key at "running", and an upstream
@@ -76,7 +77,7 @@ def transform_request(arguments, cfg, guid=None):
     if cfg.get("execute_code_using_refusal", True) and has_top_level_using(code):
         return "refuse", USING_REFUSAL_TEXT
 
-    if cfg.get("execute_code_idempotency_guard", True) and not _guard_incompatible(code):
+    if cfg.get("execute_code_idempotency_guard", True):
         new = dict(arguments)
         new["code"] = wrap_idempotent(code, guid)
         return "forward", new

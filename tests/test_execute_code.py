@@ -39,12 +39,47 @@ def test_transform_wraps_ordinary_snippet():
     assert "return null; }))();" in code
 
 
-def test_guard_skipped_for_yield_and_await():
+def test_guard_wraps_snippets_containing_yield_and_await():
+    # These substrings used to disable the guard, forwarding the snippet UNGUARDED and
+    # silently — a fail-open in the one component whose job is preventing double-execution.
+    # The wrap only adds a Func<object> lambda, so a snippet whose TOP-LEVEL shape breaks
+    # that lambda breaks the host `object Execute()` identically (it never ran either way),
+    # while a NESTED await/yield lives in the caller's own async lambda / iterator local
+    # function and nests fine. Nothing that ran before stops running; the guard now covers it.
     for snippet in ("yield return 1;", "await Task.Delay(1);"):
         action, payload = ec.transform_request(
             {"action": "execute", "code": snippet}, CFG)
         assert action == "forward"
-        assert payload["code"] == snippet  # passed through unwrapped
+        assert "System.Func<object>" in payload["code"]
+        assert snippet in payload["code"]
+
+
+def test_guard_wraps_nested_bare_return_snippet():
+    # Measured live (Plum-Remy@6401, 2026-07-16): this exact shape is legal C#, runs fine,
+    # and was forwarded UNGUARDED because _BARE_RETURN matched the nested `return;`.
+    # A build snippet carrying a helper lambda like this is what storms 6x behind a modal.
+    code = "System.Action f = () => { if (x) return; };\nf();\nreturn 1;"
+    action, payload = ec.transform_request(
+        {"action": "execute", "code": code}, CFG, guid="vrcproxy:fixed")
+    assert action == "forward"
+    assert "System.Func<object>" in payload["code"]
+    assert "proxy-duplicate-suppressed" in payload["code"]
+
+
+def test_every_execute_snippet_is_guarded():
+    # The load-bearing property: with the guard enabled, NO execute snippet reaches Unity
+    # unwrapped. There is no silent pass-through branch left to fall through.
+    for code in (
+        "return 42;",
+        "Debug.Log(1);",
+        "yield return 1;",
+        "await Task.Delay(1);",
+        "if (x) return;",
+        "",
+    ):
+        action, payload = ec.transform_request({"action": "execute", "code": code}, CFG)
+        assert action == "forward", code
+        assert "proxy-duplicate-suppressed" in payload["code"], code
 
 
 def test_guard_erases_key_and_rethrows_on_exception():
@@ -58,12 +93,15 @@ def test_guard_erases_key_and_rethrows_on_exception():
     assert code.index("catch {") < code.index('SetString(__a10k, __a10r == null')
 
 
-def test_bare_return_passes_through_unwrapped():
-    # A void `return;` inside the Func<object> lambda is CS0126 — skip the wrap.
+def test_top_level_bare_return_is_wrapped_not_passed_through():
+    # A TOP-LEVEL `return;` is CS0126 inside the Func<object> lambda — but it is equally
+    # CS0126 in the unwrapped host (`object MCPDynamicCode.Execute()`; verified live).
+    # Passing it through therefore protected nothing: the snippet fails to compile either
+    # way. It only cost the guard. Wrap it and let the compile error speak.
     action, payload = ec.transform_request(
         {"action": "execute", "code": "if (x) return; DoThing();"}, CFG)
     assert action == "forward"
-    assert payload["code"] == "if (x) return; DoThing();"
+    assert "System.Func<object>" in payload["code"]
 
 
 def test_return_with_expression_is_wrapped():
