@@ -16,10 +16,12 @@ import os
 import subprocess
 import sys
 import threading
+from datetime import datetime, timezone
 
-from . import canary, config
+from . import canary, config, instances
 from .allowlist import filter_tools_list, is_allowed, refusal_result
 from .envelope import (
+    first_text_payload,
     is_error_result,
     is_notification,
     is_request,
@@ -151,6 +153,17 @@ class Proxy:
             self._write_client(tool_error_result(req_id, canary.drift_refusal_text(name)))
             return
 
+        if self.cfg.get("instance_guard", True) and name != "set_active_instance":
+            per_call = arguments.get("unity_instance") if isinstance(arguments, dict) else None
+            live = instances.live_instances(
+                now=datetime.now(timezone.utc), window_s=instances.GUARD_WINDOW_S)
+            refusal = instances.instance_guard_refusal(
+                per_call, self.active_instance, len(live),
+                [f"{hb['project_name'] or hb['hash']}@{hb['hash']}" for hb in live])
+            if refusal is not None:
+                self._write_client(tool_error_result(req_id, refusal))
+                return
+
         if name == "execute_code":
             action, payload = execute_code.transform_request(arguments, self.cfg)
             if action == "refuse":
@@ -230,14 +243,33 @@ class Proxy:
         if name == "set_active_instance" and info.get("requested_instance") is not None \
                 and not is_error_result(msg):
             self.active_instance = info["requested_instance"]
-        if self.cfg.get("manage_asset_truth_correction", True) and \
-                name == "manage_asset" and manage_asset.is_move_call(args):
-            msg = manage_asset.correct_response(msg, args, info.get("active"))
+            # Surface the resolved project root on the pin itself (G50-B): a wrong pin is
+            # then legible from the tool result, not just from a later instance_guard block.
+            # Gated on its own `proxy_project_root` behavior (F7), not instance_guard —
+            # the two are independently disableable via VRC_MCP_PROXY_DISABLE and must not
+            # be coupled under one toggle.
+            if self.cfg.get("proxy_project_root", True):
+                root = instances.resolve_project_root(info["requested_instance"], None)
+                text, idx = first_text_payload(msg)
+                if text is not None:
+                    try:
+                        payload = json.loads(text)
+                        if isinstance(payload, dict):
+                            payload["proxy_project_root"] = root or "unresolved"
+                            msg["result"]["content"][idx]["text"] = json.dumps(payload)
+                    except (json.JSONDecodeError, TypeError):
+                        pass
+        if self.cfg.get("manage_asset_truth_correction", True) and name == "manage_asset":
+            if manage_asset.is_move_call(args):
+                msg = manage_asset.correct_response(msg, args, info.get("active"))
+            elif manage_asset.is_delete_call(args):
+                msg = manage_asset.correct_delete_response(msg, args, info.get("active"))
         # action defaults to null in the schema, so the most common call omits it — treat
         # omitted/None as "get" or the strip would skip the dominant call shape.
         if self.cfg.get("read_console_strip", True) and name == "read_console" and \
                 isinstance(args, dict) and args.get("action") in (None, "get"):
-            msg = read_console.strip_response(msg)
+            msg = read_console.strip_response(
+                msg, types=args.get("types"), filter_text=args.get("filter_text"))
         if self.cfg.get("timeout_notes", True):
             msg = timeouts.annotate(msg)
         return msg
@@ -350,6 +382,16 @@ def _watch_child(child):
 
 
 def main():
+    # Force UTF-8 on the client-facing streams: on Windows, sys.stdin/sys.stdout default
+    # to the OS ANSI codepage (e.g. cp1252) when redirected to a pipe rather than a real
+    # console, so a client's raw UTF-8 (e.g. a non-ASCII vendor path) gets misdecoded on
+    # read — a byte-for-byte mangle that then threads losslessly through every downstream
+    # json.dumps/loads (G63). The child subprocess below is already spawned with
+    # encoding="utf-8", so only this client-facing leg needs it.
+    for stream in (sys.stdin, sys.stdout):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8")
+
     child = subprocess.Popen(
         config.UPSTREAM_COMMAND,
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,

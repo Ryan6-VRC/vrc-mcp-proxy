@@ -71,8 +71,14 @@ def main():
                     {"type": "text", "text": json.dumps({"success": True, "data": [
                         "[MACS] Applying patches", "a real error"]})}], "isError": False}})
                 continue
+            # Echo the received arguments back verbatim (in addition to the existing
+            # tool/ok fields other tests already assert on) so a caller can prove what
+            # this process actually received on its own stdin — e.g. the G63 real-stdio
+            # test, which checks a non-ASCII argument survived the proxy's client-facing
+            # leg byte-for-byte.
             respond({"jsonrpc": "2.0", "id": rid, "result": {
-                "content": [{"type": "text", "text": json.dumps({"tool": name, "ok": True})}],
+                "content": [{"type": "text", "text": json.dumps(
+                    {"tool": name, "ok": True, "arguments": params.get("arguments")})}],
                 "isError": False}})
         else:
             respond({"jsonrpc": "2.0", "id": rid, "result": {}})
