@@ -119,3 +119,81 @@ def test_is_move_call():
     assert manage_asset.is_move_call({"action": "move"})
     assert manage_asset.is_move_call({"action": "rename"})
     assert not manage_asset.is_move_call({"action": "create"})
+
+
+def _delete_failure_msg():
+    return _failure_msg({"success": False,
+                         "error": "DeleteAsset call failed unexpectedly",
+                         "code": "DeleteAsset call failed unexpectedly"})
+
+
+def test_is_delete_call():
+    assert manage_asset.is_delete_call({"action": "delete"})
+    assert not manage_asset.is_delete_call({"action": "move"})
+    assert not manage_asset.is_delete_call({"action": "create"})
+    assert not manage_asset.is_delete_call("not a dict")
+
+
+def test_deleted_in_fact_is_corrected(project):
+    # Both the asset and its .meta are gone on disk -> rewrite to success, inferred from
+    # absence (never "observed" -- delete inherits G50's pin-correctness gap, see G52).
+    root, hb = project
+    args = {"action": "delete", "path": "Assets/Foo.mat"}
+    out = manage_asset.correct_delete_response(_delete_failure_msg(), args, None, directory=hb)
+    p = _payload(out)
+    assert p["success"] is True
+    assert "inferred from absence" in p["proxy_note"]
+    assert "error" not in p and "code" not in p
+    assert p["upstream_error"] == "DeleteAsset call failed unexpectedly"
+    assert p["upstream_code"] == "DeleteAsset call failed unexpectedly"
+
+
+def test_delete_genuine_failure_stays_failed(project):
+    # Asset still present on disk -> genuinely failed, left alone.
+    root, hb = project
+    asset = root / "Assets" / "Foo.mat"
+    asset.write_text("still here")
+    (root / "Assets" / "Foo.mat.meta").write_text("meta")
+    args = {"action": "delete", "path": "Assets/Foo.mat"}
+    out = manage_asset.correct_delete_response(_delete_failure_msg(), args, None, directory=hb)
+    p = _payload(out)
+    assert p["success"] is False
+    assert "still exists" in p["proxy_note"]
+
+
+def test_delete_orphan_meta_not_rewritten(project):
+    # Asset gone but its .meta lingers -> unclean delete, not truth-corrected.
+    root, hb = project
+    (root / "Assets" / "Foo.mat.meta").write_text("meta")
+    args = {"action": "delete", "path": "Assets/Foo.mat"}
+    out = manage_asset.correct_delete_response(_delete_failure_msg(), args, None, directory=hb)
+    p = _payload(out)
+    assert p["success"] is False
+    assert ".meta remains" in p["proxy_note"]
+
+
+def test_delete_unresolvable_root_is_annotated(tmp_path):
+    empty_hb = str(tmp_path / "empty")
+    os.makedirs(empty_hb)
+    args = {"action": "delete", "path": "Assets/Foo.mat"}
+    out = manage_asset.correct_delete_response(_delete_failure_msg(), args, None, directory=empty_hb)
+    p = _payload(out)
+    assert p["success"] is False
+    assert "could not verify on disk" in p["proxy_note"]
+
+
+def test_delete_traversal_path_is_unverifiable(project):
+    root, hb = project
+    args = {"action": "delete", "path": "../../../etc/passwd"}
+    out = manage_asset.correct_delete_response(_delete_failure_msg(), args, None, directory=hb)
+    p = _payload(out)
+    assert p["success"] is False
+    assert "could not verify" in p["proxy_note"]
+
+
+def test_delete_success_response_untouched(project):
+    root, hb = project
+    args = {"action": "delete", "path": "Assets/Foo.mat"}
+    msg = _failure_msg({"success": True})
+    out = manage_asset.correct_delete_response(msg, args, None, directory=hb)
+    assert "proxy_note" not in _payload(out)

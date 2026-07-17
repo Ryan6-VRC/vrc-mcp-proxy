@@ -1,4 +1,4 @@
-"""manage_asset move/rename truth-correction (response-side).
+"""manage_asset move/rename/delete truth-correction (response-side).
 
 Upstream reports move/rename failures (`success:false`) whose move actually landed on
 disk — a first-order lie, reproduced on an idle Editor, with varying error strings. So we
@@ -6,6 +6,13 @@ key on `success:false` (NO string matching) and check the filesystem: dest exist
 source gone => rewrite success:true; otherwise leave the failure. Either way we append a
 `proxy_note` naming what disk state was observed. If we can't resolve the project root,
 we leave the response and say so.
+
+Delete gets the same treatment with one caveat: "path gone" is a single negative
+condition, also true in a *foreign* project tree, so it inherits G50's pin-correctness
+exactly as move does (a wrong-but-resolved pin is not locally detectable — the
+instance_guard is the backstop, not this transform). The sibling `.meta`-gone check does
+NOT close that gap (a foreign tree lacks the `.meta` too); it exists for its own narrower
+value — orphan-meta / unclean-delete detection.
 """
 import json
 import os
@@ -18,6 +25,10 @@ _MOVE_ACTIONS = frozenset({"move", "rename"})
 
 def is_move_call(arguments):
     return isinstance(arguments, dict) and arguments.get("action") in _MOVE_ACTIONS
+
+
+def is_delete_call(arguments):
+    return isinstance(arguments, dict) and arguments.get("action") == "delete"
 
 
 def _normalize_asset_rel(asset_path):
@@ -123,6 +134,70 @@ def correct_response(msg, arguments, active_instance, directory=None):
                 f"(source exists={os.path.exists(src_abs)}, dest exists="
                 f"{os.path.exists(dst_abs)}); move did not occur."
             )
+
+    msg["result"]["content"][idx]["text"] = json.dumps(payload)
+    return msg
+
+
+def correct_delete_response(msg, arguments, active_instance, directory=None):
+    """Mutate and return the tools/call response for a delete. No-op if not a failure
+    payload. `directory` overrides the heartbeat dir (tests).
+
+    Rewrite to success:true only when the asset AND its `.meta` are both gone — and even
+    then the note says "inferred from absence", never "observed" (see module docstring:
+    this can't self-detect a wrong-but-resolved venue)."""
+    text, idx = first_text_payload(msg)
+    if text is None:
+        return msg
+    try:
+        payload = json.loads(text)
+    except (json.JSONDecodeError, TypeError):
+        return msg
+    if not isinstance(payload, dict) or payload.get("success") is not False:
+        return msg  # only touch reported failures
+
+    path_rel = arguments.get("path", "")
+    per_call = arguments.get("unity_instance")
+    root = resolve_project_root(per_call, active_instance, directory)
+
+    if root is None:
+        payload["proxy_note"] = (
+            "proxy could not verify on disk (no project root resolved from the "
+            "~/.unity-mcp heartbeats; pin an instance with set_active_instance)."
+        )
+    else:
+        abs_path = _resolve_asset_path(root, path_rel)
+        if abs_path is None:
+            payload["proxy_note"] = (
+                "proxy could not verify on disk: the asset path is absolute or escapes "
+                "the project (traversal) — unverifiable, the reported failure is left "
+                "as-is."
+            )
+        else:
+            meta_abs = abs_path + ".meta"
+            asset_gone = not os.path.exists(abs_path)
+            meta_gone = not os.path.exists(meta_abs)
+            if asset_gone and meta_gone:
+                payload["success"] = True
+                # A success:true payload must not keep live error/code keys — that shape
+                # invites misreading. Preserve the upstream strings under upstream_* instead.
+                for key in ("error", "code"):
+                    if key in payload:
+                        payload[f"upstream_{key}"] = payload.pop(key)
+                payload["proxy_note"] = (
+                    f"upstream reported failure but {path_rel} and its .meta are both "
+                    f"gone on disk — success inferred from absence, not observed."
+                )
+            elif asset_gone:  # asset gone, .meta still present: unclean delete
+                payload["proxy_note"] = (
+                    f"disk state inconsistent with a clean delete: {path_rel} is gone "
+                    f"but its .meta remains — not truth-corrected."
+                )
+            else:
+                payload["proxy_note"] = (
+                    f"disk state verified consistent with the reported failure "
+                    f"({path_rel} still exists); delete did not occur."
+                )
 
     msg["result"]["content"][idx]["text"] = json.dumps(payload)
     return msg

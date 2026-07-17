@@ -197,9 +197,11 @@ class Proxy:
                         msg["result"]["content"][idx]["text"] = json.dumps(payload)
                 except (json.JSONDecodeError, TypeError):
                     pass
-        if self.cfg.get("manage_asset_truth_correction", True) and \
-                name == "manage_asset" and manage_asset.is_move_call(args):
-            msg = manage_asset.correct_response(msg, args, info.get("active"))
+        if self.cfg.get("manage_asset_truth_correction", True) and name == "manage_asset":
+            if manage_asset.is_move_call(args):
+                msg = manage_asset.correct_response(msg, args, info.get("active"))
+            elif manage_asset.is_delete_call(args):
+                msg = manage_asset.correct_delete_response(msg, args, info.get("active"))
         # action defaults to null in the schema, so the most common call omits it — treat
         # omitted/None as "get" or the strip would skip the dominant call shape.
         if self.cfg.get("read_console_strip", True) and name == "read_console" and \
