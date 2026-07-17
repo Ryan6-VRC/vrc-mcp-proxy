@@ -16,6 +16,12 @@ from datetime import datetime
 
 DEFAULT_DIR = os.path.join(os.path.expanduser("~"), ".unity-mcp")
 
+# How long a heartbeat stays "live" for instance_guard. Long, deliberately: a false-refuse
+# is safe (the model just pins), a false-pass is the dangerous wrong-venue mutation, and the
+# window must outlast a busy editor's main-thread block (domain reload, large import), not
+# just upstream's own 60s reload grace. See design doc §G50-A.
+GUARD_WINDOW_S = 180
+
 
 def _parse_heartbeat(value):
     """Parse the status JSON's `last_heartbeat` ISO-8601 string, or None on any failure."""
@@ -65,6 +71,24 @@ def live_instances(directory=None, now=None, window_s=180):
         if ts is not None and (now - ts).total_seconds() <= window_s:
             out.append(hb)
     return out
+
+
+def instance_guard_refusal(per_call_instance, active_instance, live_count, live_names):
+    """Refusal text for an unpinned `tools/call` while 2+ editors are live, or None to forward.
+
+    Fires only when the call is genuinely ambiguous: no per-call `unity_instance`, no
+    session-pinned `active_instance`, and `live_count` (a probe-free heartbeat count from
+    `live_instances`) is 2 or more. `live_names` are display strings (e.g. `Name@hash`)
+    named in the refusal alongside the `set_active_instance` fix.
+    """
+    if per_call_instance is not None or active_instance is not None or live_count < 2:
+        return None
+    names = ", ".join(sorted(live_names))
+    return (
+        f"{live_count} Unity editors are live ({names}) and no instance is pinned. "
+        f"Pin one with set_active_instance before this call — the proxy refuses an "
+        f"unpinned call while multiple editors are live to prevent wrong-venue routing."
+    )
 
 
 def _selects(hb, selector):

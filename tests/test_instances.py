@@ -92,3 +92,37 @@ def test_live_instances_boundary_is_inclusive(tmp_path):
 
     live = instances.live_instances(str(tmp_path), now, 180)
     assert [hb["hash"] for hb in live] == ["exact111"]
+
+
+# --- instance_guard_refusal truth table -------------------------------------
+def test_guard_refuses_when_unpinned_and_two_plus_live():
+    text = instances.instance_guard_refusal(None, None, 2, ["One@aaaa", "Two@bbbb"])
+    assert text is not None
+    assert "One@aaaa" in text and "Two@bbbb" in text
+    assert "set_active_instance" in text
+
+
+def test_guard_names_are_sorted_regardless_of_input_order():
+    text = instances.instance_guard_refusal(None, None, 2, ["Zebra@zzzz", "Alpha@aaaa"])
+    assert text.index("Alpha@aaaa") < text.index("Zebra@zzzz")
+
+
+def test_guard_forwards_when_per_call_instance_set():
+    assert instances.instance_guard_refusal("Two@bbbb", None, 2, ["One@aaaa", "Two@bbbb"]) is None
+
+
+def test_guard_forwards_when_active_instance_set():
+    assert instances.instance_guard_refusal(None, "One@aaaa", 2, ["One@aaaa", "Two@bbbb"]) is None
+
+
+def test_guard_forwards_when_zero_live():
+    assert instances.instance_guard_refusal(None, None, 0, []) is None
+
+
+def test_guard_forwards_when_one_live():
+    assert instances.instance_guard_refusal(None, None, 1, ["One@aaaa"]) is None
+
+
+def test_guard_forwards_when_three_plus_live_but_pinned():
+    assert instances.instance_guard_refusal(
+        "Two@bbbb", "One@aaaa", 3, ["One@aaaa", "Two@bbbb", "Three@cccc"]) is None

@@ -15,8 +15,9 @@ import os
 import subprocess
 import sys
 import threading
+from datetime import datetime, timezone
 
-from . import canary, config
+from . import canary, config, instances
 from .allowlist import filter_tools_list, is_allowed, refusal_result
 from .envelope import (
     is_error_result,
@@ -103,6 +104,17 @@ class Proxy:
         if self.cfg.get("canary", True) and name in self.drifted:
             self._write_client(tool_error_result(req_id, canary.drift_refusal_text(name)))
             return
+
+        if self.cfg.get("instance_guard", True) and name != "set_active_instance":
+            per_call = arguments.get("unity_instance") if isinstance(arguments, dict) else None
+            live = instances.live_instances(
+                now=datetime.now(timezone.utc), window_s=instances.GUARD_WINDOW_S)
+            refusal = instances.instance_guard_refusal(
+                per_call, self.active_instance, len(live),
+                [f"{hb['project_name']}@{hb['hash']}" for hb in live])
+            if refusal is not None:
+                self._write_client(tool_error_result(req_id, refusal))
+                return
 
         if name == "execute_code":
             action, payload = execute_code.transform_request(arguments, self.cfg)
