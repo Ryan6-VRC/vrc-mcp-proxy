@@ -206,7 +206,8 @@ class Proxy:
         # omitted/None as "get" or the strip would skip the dominant call shape.
         if self.cfg.get("read_console_strip", True) and name == "read_console" and \
                 isinstance(args, dict) and args.get("action") in (None, "get"):
-            msg = read_console.strip_response(msg)
+            msg = read_console.strip_response(
+                msg, types=args.get("types"), filter_text=args.get("filter_text"))
         if self.cfg.get("timeout_notes", True):
             msg = timeouts.annotate(msg)
         return msg

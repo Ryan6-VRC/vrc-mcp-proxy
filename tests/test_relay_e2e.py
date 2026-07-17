@@ -96,6 +96,26 @@ def test_read_console_strip_fires_without_action_key():
         child.terminate()
 
 
+def test_read_console_filter_text_arg_reaches_strip_response():
+    # AC4: proxy._handle_call_response must thread args["filter_text"] through to
+    # strip_response. Upstream's own filter_text is a no-op (fake_upstream returns the
+    # same two lines regardless), so this proves the PROXY enforced it: with
+    # filter_text="MACS", the benign MACS line must survive (client-filter exemption,
+    # F44) while the non-matching real-error line is dropped by the client filter.
+    proxy, child, sink = _proxy({"read_console_strip": True})
+    try:
+        proxy.handle_client_line(json.dumps(
+            {"jsonrpc": "2.0", "id": 5, "method": "tools/call",
+             "params": {"name": "read_console",
+                        "arguments": {"filter_text": "MACS"}}}))
+        resp = sink.wait_for_id(5)
+        data = json.loads(resp["result"]["content"][0]["text"])["data"]
+        assert "[MACS] Applying patches" in data
+        assert "a real error" not in data
+    finally:
+        child.terminate()
+
+
 def test_allowed_tool_call_relays_through():
     proxy, child, sink = _proxy({"allowlist": True})
     try:

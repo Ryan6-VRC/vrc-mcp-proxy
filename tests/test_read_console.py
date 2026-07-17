@@ -131,3 +131,111 @@ def test_strip_response_rewrites_content():
     out = read_console.strip_response(msg)
     payload = json.loads(out["result"]["content"][0]["text"])
     assert any("vrc-mcp-proxy" in e["message"] for e in payload["data"]["lines"])
+
+
+# --- F44: client types/filter_text enforcement, applied before the benign-strip -----
+
+def _msg_for(payload):
+    return {"jsonrpc": "2.0", "id": 1, "result": {"content": [
+        {"type": "text", "text": json.dumps(payload)}]}}
+
+
+def _payload_of(msg):
+    return json.loads(msg["result"]["content"][0]["text"])
+
+
+def test_strip_response_no_filter_args_unchanged():
+    # AC5 / test (c): no filter args -> existing benign-strip behavior, verbatim.
+    msg = _msg_for({"data": {"lines": _entries()}})
+    out = read_console.strip_response(msg, types=None, filter_text=None)
+    payload = _payload_of(out)
+    kept = payload["data"]["lines"][:-1]
+    messages = [e["message"] for e in kept]
+    assert "Real error: NullReferenceException" in messages
+    assert "ordinary line" in messages
+    assert not any("[MACS]" in m for m in messages)
+    trailer = payload["data"]["lines"][-1]
+    assert trailer["message"].startswith("[vrc-mcp-proxy] stripped 4 benign console line(s)")
+
+
+def test_strip_response_types_filter_keeps_only_matching_type():
+    # Test (a): detailed buffer, types=["error"] -> only errors survive + trailer mentions it.
+    entries = [
+        {"type": "Error", "message": "NullReferenceException at Foo", "stackTrace": "at X"},
+        {"type": "Log", "message": "ordinary log line", "stackTrace": ""},
+        {"type": "Warning", "message": "some warning", "stackTrace": ""},
+    ]
+    msg = _msg_for({"data": {"lines": entries}})
+    out = read_console.strip_response(msg, types=["error"])
+    payload = _payload_of(out)
+    lines = payload["data"]["lines"]
+    kept = [e for e in lines if "vrc-mcp-proxy" not in e.get("message", "")]
+    assert len(kept) == 1
+    assert kept[0]["message"] == "NullReferenceException at Foo"
+    trailer = lines[-1]
+    assert "client filter" in trailer["message"]
+    assert "dropped 2" in trailer["message"]
+
+
+def test_strip_response_filter_text_matching_benign_line_survives():
+    # Test (b): filter_text="MACS" over a buffer with a benign MACS line -> the MACS
+    # line SURVIVES, because the client filter runs (and exempts it) before the strip.
+    entries = [
+        {"type": "Error", "message": "[MACS] Failed to apply patch to Foo.cs", "stackTrace": ""},
+        {"type": "Log", "message": "ordinary log line", "stackTrace": ""},
+    ]
+    msg = _msg_for({"data": {"lines": entries}})
+    out = read_console.strip_response(msg, filter_text="MACS")
+    payload = _payload_of(out)
+    lines = payload["data"]["lines"]
+    messages = [e["message"] for e in lines]
+    assert "[MACS] Failed to apply patch to Foo.cs" in messages
+    assert "ordinary log line" not in messages  # dropped by the client filter itself
+    trailer = lines[-1]
+    assert "client filter" in trailer["message"]
+    assert "dropped 1" in trailer["message"]
+    # the benign-strip's own MACS label must NOT appear — it never fired on the exempt entry
+    assert "MACS third-party load noise" not in trailer["message"]
+
+
+def test_strip_response_filter_text_plain_string_format():
+    # filter_text works on the plain-string format too.
+    payload = {"data": [
+        "ordinary log line",
+        "[MACS] Applying patches",
+        "a real error the model must see",
+    ]}
+    msg = _msg_for(payload)
+    out = read_console.strip_response(msg, filter_text="real error")
+    lines = _payload_of(out)["data"]
+    assert lines[0] == "a real error the model must see"
+    assert "ordinary log line" not in lines
+    assert "[MACS] Applying patches" not in lines
+
+
+def test_strip_response_types_not_enforced_on_plain_strings_notes_limitation():
+    # Test (a variant) / AC3: types requested against plain-string entries is a no-op,
+    # but the trailer must say so (never silent).
+    payload = {"data": ["a plain error line", "an ordinary log line"]}
+    msg = _msg_for(payload)
+    out = read_console.strip_response(msg, types=["error"])
+    lines = _payload_of(out)["data"]
+    assert "a plain error line" in lines
+    assert "an ordinary log line" in lines  # NOT dropped -- types unenforceable here
+    trailer = lines[-1]
+    assert isinstance(trailer, str)
+    assert "types not enforced on plain-string entries" in trailer
+
+
+def test_client_filter_helper_types_and_text_combined():
+    entries = [
+        {"type": "Error", "message": "[MACS] noise", "stackTrace": ""},
+        {"type": "Error", "message": "a real MACS-adjacent bug", "stackTrace": ""},
+        {"type": "Log", "message": "a real MACS-adjacent bug", "stackTrace": ""},
+    ]
+    kept, exempt_ids, dropped, plain_unenforced = read_console._client_filter(
+        entries, types=["error"], filter_text="MACS")
+    assert len(kept) == 2  # the Log entry dropped by types, despite matching filter_text
+    assert dropped == 1
+    assert plain_unenforced is False
+    assert all(id(e) in exempt_ids for e in kept)  # all survivors matched filter_text
