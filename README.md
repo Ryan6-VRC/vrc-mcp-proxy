@@ -23,9 +23,11 @@ upstream pin.
 | `allowlist` | tools/list resp + tools/call req | Exposes only the allowlisted tools; refuses the rest, naming the one-line fix. |
 | `execute_code_using_refusal` | tools/call req | Refuses snippets with top-level `using` directives (they can't live in a method body). |
 | `execute_code_idempotency_guard` | tools/call req | Wraps snippets in a SessionState guard so an upstream transport re-send returns the cached result instead of running twice. |
-| `manage_asset_truth_correction` | tools/call resp | On a move/rename reported as failed, verifies on disk and rewrites a false failure to success. |
-| `read_console_strip` | tools/call resp | Drops known-benign console noise and appends a trailer naming what was stripped (never silent). |
+| `manage_asset_truth_correction` | tools/call resp | On a move/rename/delete reported as failed, verifies on disk and rewrites a false failure to success (delete: only when the asset and its `.meta` are both gone — inferred from absence, not observed). |
+| `read_console_strip` | tools/call resp | Enforces the client's `types`/`filter_text` (upstream no-ops them) before dropping known-benign console noise, and appends a trailer naming what either step removed (never silent). A `filter_text` match is exempt from the benign-strip, so filtering *for* noise (e.g. `"MACS"`) isn't self-defeating. |
 | `timeout_notes` | tools/call resp | Appends a note to timeout errors: the work may have run; verify on disk before retrying. |
+| `instance_guard` | tools/call req | Refuses an unpinned call while 2+ Unity editors are live (probe-free heartbeat count), naming them and `set_active_instance`. Exempts `set_active_instance` itself. |
+| `proxy_project_root` | tools/call resp (`set_active_instance`) | On a successful pin, surfaces the resolved project root as `proxy_project_root` in the result (or `"unresolved"`) — a wrong pin is then legible from the tool result itself, not just from a later `instance_guard` refusal. Independently disableable from `instance_guard`. |
 
 ## Wiring it into `.mcp.json`
 

@@ -119,3 +119,141 @@ def test_is_move_call():
     assert manage_asset.is_move_call({"action": "move"})
     assert manage_asset.is_move_call({"action": "rename"})
     assert not manage_asset.is_move_call({"action": "create"})
+
+
+def _delete_failure_msg():
+    return _failure_msg({"success": False,
+                         "error": "DeleteAsset call failed unexpectedly",
+                         "code": "DeleteAsset call failed unexpectedly"})
+
+
+def test_is_delete_call():
+    assert manage_asset.is_delete_call({"action": "delete"})
+    assert not manage_asset.is_delete_call({"action": "move"})
+    assert not manage_asset.is_delete_call({"action": "create"})
+    assert not manage_asset.is_delete_call("not a dict")
+
+
+def test_deleted_in_fact_is_corrected(project):
+    # Both the asset and its .meta are gone on disk -> rewrite to success, inferred from
+    # absence (never "observed" -- delete inherits G50's pin-correctness gap, see G52).
+    root, hb = project
+    args = {"action": "delete", "path": "Assets/Foo.mat"}
+    out = manage_asset.correct_delete_response(_delete_failure_msg(), args, None, directory=hb)
+    p = _payload(out)
+    assert p["success"] is True
+    assert "inferred from absence" in p["proxy_note"]
+    assert "error" not in p and "code" not in p
+    assert p["upstream_error"] == "DeleteAsset call failed unexpectedly"
+    assert p["upstream_code"] == "DeleteAsset call failed unexpectedly"
+
+
+def test_delete_genuine_failure_stays_failed(project):
+    # Asset still present on disk -> genuinely failed, left alone.
+    root, hb = project
+    asset = root / "Assets" / "Foo.mat"
+    asset.write_text("still here")
+    (root / "Assets" / "Foo.mat.meta").write_text("meta")
+    args = {"action": "delete", "path": "Assets/Foo.mat"}
+    out = manage_asset.correct_delete_response(_delete_failure_msg(), args, None, directory=hb)
+    p = _payload(out)
+    assert p["success"] is False
+    assert "still exists" in p["proxy_note"]
+
+
+def test_delete_orphan_meta_not_rewritten(project):
+    # Asset gone but its .meta lingers -> unclean delete, not truth-corrected.
+    root, hb = project
+    (root / "Assets" / "Foo.mat.meta").write_text("meta")
+    args = {"action": "delete", "path": "Assets/Foo.mat"}
+    out = manage_asset.correct_delete_response(_delete_failure_msg(), args, None, directory=hb)
+    p = _payload(out)
+    assert p["success"] is False
+    assert ".meta remains" in p["proxy_note"]
+
+
+def test_delete_unresolvable_root_is_annotated(tmp_path):
+    empty_hb = str(tmp_path / "empty")
+    os.makedirs(empty_hb)
+    args = {"action": "delete", "path": "Assets/Foo.mat"}
+    out = manage_asset.correct_delete_response(_delete_failure_msg(), args, None, directory=empty_hb)
+    p = _payload(out)
+    assert p["success"] is False
+    assert "could not verify on disk" in p["proxy_note"]
+
+
+def test_delete_traversal_path_is_unverifiable(project):
+    root, hb = project
+    args = {"action": "delete", "path": "../../../etc/passwd"}
+    out = manage_asset.correct_delete_response(_delete_failure_msg(), args, None, directory=hb)
+    p = _payload(out)
+    assert p["success"] is False
+    assert "could not verify" in p["proxy_note"]
+
+
+def test_delete_traversal_within_root_escaping_assets_is_unverifiable(project):
+    # F4: "Assets/../ProjectSettings/Foo.asset" normalizes to <root>/ProjectSettings/
+    # Foo.asset -- still inside the project root, so it used to pass the root-commonpath
+    # guard and get falsely truth-corrected (the target doesn't exist -> "both gone" ->
+    # success:true), despite escaping Assets/ itself.
+    root, hb = project
+    args = {"action": "delete", "path": "Assets/../ProjectSettings/Foo.asset"}
+    out = manage_asset.correct_delete_response(_delete_failure_msg(), args, None, directory=hb)
+    p = _payload(out)
+    assert p["success"] is False
+    assert "could not verify" in p["proxy_note"]
+
+
+def test_delete_success_response_untouched(project):
+    root, hb = project
+    args = {"action": "delete", "path": "Assets/Foo.mat"}
+    msg = _failure_msg({"success": True})
+    out = manage_asset.correct_delete_response(msg, args, None, directory=hb)
+    assert "proxy_note" not in _payload(out)
+
+
+# --- Fix 3: os.path.exists() can't prove "gone" -- lstat three-state -------
+def test_delete_unverifiable_lstat_failure_not_rewritten(project, monkeypatch):
+    # Neither the asset nor its .meta exist for real, so the old os.path.exists() check
+    # would happily rewrite this to success. But the target's lstat fails with something
+    # other than FileNotFoundError (e.g. a permission/IO error) -- that's "couldn't tell",
+    # not "confirmed gone", and must NOT be truth-corrected.
+    root, hb = project
+    target = str(root / "Assets" / "Foo.mat")
+    real_lstat = os.lstat
+
+    def fake_lstat(path, *a, **k):
+        if os.path.normpath(str(path)) == os.path.normpath(target):
+            raise PermissionError("denied")
+        return real_lstat(path, *a, **k)
+
+    monkeypatch.setattr(os, "lstat", fake_lstat)
+    args = {"action": "delete", "path": "Assets/Foo.mat"}
+    out = manage_asset.correct_delete_response(_delete_failure_msg(), args, None, directory=hb)
+    p = _payload(out)
+    assert p["success"] is False
+    assert "could not confirm" in p["proxy_note"]
+
+
+def test_move_unverifiable_lstat_failure_not_rewritten(project, monkeypatch):
+    # dest exists and src genuinely doesn't -- the old os.path.exists() check would rewrite
+    # this to success. But the src's lstat fails with a non-FileNotFoundError OSError, so
+    # it must be left as an unverifiable failure instead.
+    root, hb = project
+    dst = root / "Assets" / "Bar" / "a.mat"
+    dst.parent.mkdir(parents=True)
+    dst.write_text("moved")
+    src_target = str(root / "Assets" / "Foo" / "a.mat")
+    real_lstat = os.lstat
+
+    def fake_lstat(path, *a, **k):
+        if os.path.normpath(str(path)) == os.path.normpath(src_target):
+            raise PermissionError("denied")
+        return real_lstat(path, *a, **k)
+
+    monkeypatch.setattr(os, "lstat", fake_lstat)
+    args = {"action": "move", "path": "Assets/Foo/a.mat", "destination": "Assets/Bar/a.mat"}
+    out = manage_asset.correct_response(_failure_msg(), args, None, directory=hb)
+    p = _payload(out)
+    assert p["success"] is False
+    assert "could not confirm" in p["proxy_note"]

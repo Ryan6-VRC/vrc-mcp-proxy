@@ -26,6 +26,8 @@ BEHAVIORS = (
     "manage_asset_truth_correction",
     "read_console_strip",
     "timeout_notes",
+    "instance_guard",
+    "proxy_project_root",
 )
 
 
