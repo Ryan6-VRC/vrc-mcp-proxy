@@ -253,6 +253,16 @@ def _watch_child(child):
 
 
 def main():
+    # Force UTF-8 on the client-facing streams: on Windows, sys.stdin/sys.stdout default
+    # to the OS ANSI codepage (e.g. cp1252) when redirected to a pipe rather than a real
+    # console, so a client's raw UTF-8 (e.g. a non-ASCII vendor path) gets misdecoded on
+    # read — a byte-for-byte mangle that then threads losslessly through every downstream
+    # json.dumps/loads (G63). The child subprocess below is already spawned with
+    # encoding="utf-8", so only this client-facing leg needs it.
+    for stream in (sys.stdin, sys.stdout):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8")
+
     child = subprocess.Popen(
         config.UPSTREAM_COMMAND,
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,

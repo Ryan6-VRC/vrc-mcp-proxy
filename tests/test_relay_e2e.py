@@ -128,3 +128,83 @@ def test_allowed_tool_call_relays_through():
         assert payload["tool"] == "execute_code" and payload["ok"] is True
     finally:
         child.terminate()
+
+
+# --- G63: non-ASCII (e.g. JP-vendor folder names) must survive the proxy's real stdio --
+
+LAUNCHER = os.path.join(os.path.dirname(__file__), "real_stdio_launcher.py")
+
+
+def test_non_ascii_argument_round_trips_through_real_stdio():
+    """Drives the REAL entrypoint (main()'s actual sys.stdin/sys.stdout), not the
+    in-process Proxy() harness used above — that harness hands Proxy() a plain Python
+    object as client_out and never touches real stdio, so it cannot see a Windows
+    default-codepage (cp1252) bug in main()'s stream setup. This spawns the proxy as an
+    OS subprocess (as a real MCP client would), writes a raw UTF-8-encoded JSON-RPC line
+    containing a non-ASCII path to its stdin, and checks the fake child's echoed
+    "arguments" (round-tripped through the same JSON-escaping the proxy uses on every
+    message) to prove what the child actually received.
+
+    Pre-fix: cp1252 decodes the UTF-8 bytes for U+2665 (E2 99 A5) as three separate
+    codepoints (â, ™, ¥); those wrong codepoints get JSON-escaped and threaded through
+    losslessly from then on, so the echoed value comes back mangled, not merely
+    re-encoded-and-cancelled-out.
+    """
+    env = dict(os.environ)
+    env["VRC_MCP_PROXY_DISABLE"] = ",".join(config.BEHAVIORS)  # no allowlist/instance_guard/etc.
+    proc = subprocess.Popen(
+        [sys.executable, LAUNCHER],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        env=env)
+
+    lines = []
+    lock = threading.Lock()
+
+    def _pump():
+        for raw in proc.stdout:
+            with lock:
+                lines.append(raw)
+
+    threading.Thread(target=_pump, daemon=True).start()
+
+    try:
+        heart_path = "♥LIME♥"
+        request = {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                   "params": {"name": "echo_test", "arguments": {"path": heart_path}}}
+        # ensure_ascii=False: put the literal UTF-8 bytes for ♥ on the wire, matching a
+        # real client (json.dumps' default ensure_ascii=True would \u-escape it to pure
+        # ASCII before send, which never exercises the stdin codepage decode at all).
+        wire = json.dumps(request, ensure_ascii=False) + "\n"
+        proc.stdin.write(wire.encode("utf-8"))
+        proc.stdin.flush()
+
+        deadline = time.time() + 10
+        payload = None
+        while time.time() < deadline and payload is None:
+            with lock:
+                snapshot = list(lines)
+            for raw in snapshot:
+                text = raw.decode("utf-8").strip()
+                if not text:
+                    continue
+                msg = json.loads(text)
+                if msg.get("id") == 1:
+                    payload = json.loads(msg["result"]["content"][0]["text"])
+                    break
+            if payload is None:
+                time.sleep(0.02)
+
+        assert payload is not None, "no id=1 response from the real proxy subprocess"
+        assert payload["arguments"]["path"] == heart_path, (
+            "non-ASCII path mangled crossing the proxy's real client-facing stdio: "
+            f"sent {heart_path!r}, child received {payload['arguments']['path']!r}")
+    finally:
+        proc.stdin.close()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.terminate()
+            proc.wait(timeout=5)
+        err = proc.stderr.read().decode("utf-8", errors="replace")
+        if err.strip():
+            print(err, file=sys.stderr)
