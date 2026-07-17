@@ -12,12 +12,23 @@ itself routes on.
 import glob
 import json
 import os
+from datetime import datetime
 
 DEFAULT_DIR = os.path.join(os.path.expanduser("~"), ".unity-mcp")
 
 
+def _parse_heartbeat(value):
+    """Parse the status JSON's `last_heartbeat` ISO-8601 string, or None on any failure."""
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+
+
 def read_heartbeats(directory=None):
-    """List of {hash, port, assets_path, project_root, project_name} for live Editors."""
+    """List of {hash, port, assets_path, project_root, project_name, last_heartbeat} for live Editors."""
     directory = DEFAULT_DIR if directory is None else directory
     out = []
     for path in glob.glob(os.path.join(directory, "unity-mcp-status-*.json")):
@@ -37,7 +48,22 @@ def read_heartbeats(directory=None):
             "assets_path": assets,
             "project_root": root,
             "project_name": data.get("project_name"),
+            "last_heartbeat": _parse_heartbeat(data.get("last_heartbeat")),
         })
+    return out
+
+
+def live_instances(directory=None, now=None, window_s=180):
+    """Heartbeats from `read_heartbeats` whose `last_heartbeat` is within `window_s`s of `now`.
+
+    `now` is caller-supplied (never sampled here) so freshness checks are deterministic.
+    Entries with no parseable `last_heartbeat` are excluded.
+    """
+    out = []
+    for hb in read_heartbeats(directory):
+        ts = hb.get("last_heartbeat")
+        if ts is not None and (now - ts).total_seconds() <= window_s:
+            out.append(hb)
     return out
 
 
