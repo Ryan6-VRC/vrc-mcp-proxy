@@ -28,13 +28,20 @@ from .transforms import execute_code, manage_asset, read_console, timeouts
 
 # The F52 watchdog synth. Fingerprints the Roslyn background-compile hang and routes to the
 # proven recovery (codedom retry → editor restart), not "retry is safe". See docs/design.md.
+# {threshold} is interpolated at fire time with the live (env-overridable) deadline so the
+# note never states a number that disagrees with VRC_MCP_PROXY_EXECUTE_TIMEOUT_S.
 WATCHDOG_NOTE = (
-    "execute_code exceeded 120s with no response — this fingerprints the Roslyn "
+    "execute_code exceeded {threshold}s with no response — this fingerprints the Roslyn "
     "background-compile hang (the editor is likely fine; other tools respond). Retry "
     '**this snippet** with `compiler:"codedom"`, which bypasses it. If the snippet '
     "mutated, verify on disk before re-running. If codedom rejects the syntax (C#7+) or "
     "you can't safely re-run, restart the editor — the hang is per-editor Roslyn state."
 )
+
+
+def _watchdog_note(threshold_s):
+    """The synth text with the live threshold interpolated (`:g` drops a trailing .0)."""
+    return WATCHDOG_NOTE.format(threshold=f"{threshold_s:g}")
 
 # Default watchdog threshold: comfortably above the ~36s upstream main-thread bounce and
 # normal compiles, far below the 1800s client idle cap. Only F52-class background-compile
@@ -276,7 +283,8 @@ class Proxy:
             if req_id not in self.pending:
                 return  # the real response already arrived and _take ran; nothing to synth
             self.timed_out.add(req_id)
-        self._write_client(tool_error_result(req_id, WATCHDOG_NOTE))
+        self._write_client(
+            tool_error_result(req_id, _watchdog_note(self._execute_timeout_s)))
 
     # --- pump loop (child -> client) --------------------------------------
     def pump_child(self):

@@ -126,8 +126,10 @@ def test_execute_watchdog_synthesizes_timeout_and_drops_late_response():
              "params": {"name": "execute_code",
                         "arguments": {"action": "execute", "code": "x", "hold": True}}}))
         resp = sink.wait_for_id(10)
+        text = resp["result"]["content"][0]["text"]
         assert resp["result"]["isError"] is True
-        assert "codedom" in resp["result"]["content"][0]["text"]
+        assert "codedom" in text
+        assert "0.3s" in text  # the live threshold is interpolated, not a hardcoded 120s
 
         # Release the withheld real response for id 10; it must be dropped, not forwarded.
         # The release call (id 11) is emitted AFTER the withheld line, so once id 11 lands
