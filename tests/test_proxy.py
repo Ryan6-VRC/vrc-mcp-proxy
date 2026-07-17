@@ -202,7 +202,7 @@ def _json_response(rid, payload, is_error=False):
 def test_set_active_instance_success_gains_proxy_project_root(tmp_path, monkeypatch):
     monkeypatch.setattr(instances, "DEFAULT_DIR", str(tmp_path))
     _write_hb(tmp_path, "aaaa1111", 6401, "C:/proj/One", "One")
-    p = _proxy(_all_off())
+    p = _proxy(_guard_cfg())  # proxy_project_root is gated on instance_guard (F5)
 
     p.handle_client_line(_set_active_request(1, "One@aaaa1111"))
     p.handle_child_line(_json_response(1, {"ok": True}))
@@ -215,7 +215,7 @@ def test_set_active_instance_success_gains_proxy_project_root(tmp_path, monkeypa
 def test_set_active_instance_success_unresolved_root(tmp_path, monkeypatch):
     monkeypatch.setattr(instances, "DEFAULT_DIR", str(tmp_path))
     # No heartbeat file at all: the just-pinned instance can't be resolved on disk.
-    p = _proxy(_all_off())
+    p = _proxy(_guard_cfg())
 
     p.handle_client_line(_set_active_request(1, "Ghost@dead0000"))
     p.handle_child_line(_json_response(1, {"ok": True}))
@@ -228,7 +228,7 @@ def test_set_active_instance_success_unresolved_root(tmp_path, monkeypatch):
 def test_set_active_instance_error_response_unchanged(tmp_path, monkeypatch):
     monkeypatch.setattr(instances, "DEFAULT_DIR", str(tmp_path))
     _write_hb(tmp_path, "aaaa1111", 6401, "C:/proj/One", "One")
-    p = _proxy(_all_off())
+    p = _proxy(_guard_cfg())
 
     p.handle_client_line(_set_active_request(1, "One@aaaa1111"))
     p.handle_child_line(_json_response(1, {"error": "nope"}, is_error=True))
@@ -236,3 +236,22 @@ def test_set_active_instance_error_response_unchanged(tmp_path, monkeypatch):
     [line] = p.client_out.lines
     payload = json.loads(json.loads(line)["result"]["content"][0]["text"])
     assert "proxy_project_root" not in payload
+
+
+# --- F5: proxy_project_root must be gated on instance_guard, not unconditional ----------
+def test_set_active_instance_success_no_proxy_project_root_when_guard_disabled(
+        tmp_path, monkeypatch):
+    monkeypatch.setattr(instances, "DEFAULT_DIR", str(tmp_path))
+    _write_hb(tmp_path, "aaaa1111", 6401, "C:/proj/One", "One")
+    cfg = config.load_config(env={"VRC_MCP_PROXY_DISABLE": "instance_guard"})
+    p = _proxy(cfg)
+
+    p.handle_client_line(_set_active_request(1, "One@aaaa1111"))
+    p.handle_child_line(_json_response(1, {"ok": True}))
+
+    [line] = p.client_out.lines
+    payload = json.loads(json.loads(line)["result"]["content"][0]["text"])
+    assert payload == {"ok": True}
+    assert "proxy_project_root" not in payload
+    # the active_instance commit itself is a separate concern and must still happen
+    assert p.active_instance == "One@aaaa1111"

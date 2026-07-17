@@ -49,6 +49,12 @@ def _normalize_asset_rel(asset_path):
     p = p.lstrip("/")
     if not p:
         return None
+    if any(part == ".." for part in p.split("/")):
+        # A ".." component can normalize to a path that's still inside the project root
+        # (e.g. "Assets/../ProjectSettings/Foo.asset" -> <root>/ProjectSettings/Foo.asset)
+        # and so pass the root-commonpath guard below despite escaping Assets/ itself —
+        # reject any traversal component outright rather than rely on that guard (F4).
+        return None
     if p.split("/", 1)[0] != "Assets":
         p = "Assets/" + p
     return p

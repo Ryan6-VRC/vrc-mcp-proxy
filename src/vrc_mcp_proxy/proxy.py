@@ -112,7 +112,7 @@ class Proxy:
                 now=datetime.now(timezone.utc), window_s=instances.GUARD_WINDOW_S)
             refusal = instances.instance_guard_refusal(
                 per_call, self.active_instance, len(live),
-                [f"{hb['project_name']}@{hb['hash']}" for hb in live])
+                [f"{hb['project_name'] or hb['hash']}@{hb['hash']}" for hb in live])
             if refusal is not None:
                 self._write_client(tool_error_result(req_id, refusal))
                 return
@@ -187,16 +187,20 @@ class Proxy:
             self.active_instance = info["requested_instance"]
             # Surface the resolved project root on the pin itself (G50-B): a wrong pin is
             # then legible from the tool result, not just from a later instance_guard block.
-            root = instances.resolve_project_root(info["requested_instance"], None)
-            text, idx = first_text_payload(msg)
-            if text is not None:
-                try:
-                    payload = json.loads(text)
-                    if isinstance(payload, dict):
-                        payload["proxy_project_root"] = root or "unresolved"
-                        msg["result"]["content"][idx]["text"] = json.dumps(payload)
-                except (json.JSONDecodeError, TypeError):
-                    pass
+            # Gated on instance_guard (F5): it's part of the same G50 instance-targeting
+            # story as the guard refusal, and every behavior here must be independently
+            # disableable via VRC_MCP_PROXY_DISABLE.
+            if self.cfg.get("instance_guard", True):
+                root = instances.resolve_project_root(info["requested_instance"], None)
+                text, idx = first_text_payload(msg)
+                if text is not None:
+                    try:
+                        payload = json.loads(text)
+                        if isinstance(payload, dict):
+                            payload["proxy_project_root"] = root or "unresolved"
+                            msg["result"]["content"][idx]["text"] = json.dumps(payload)
+                    except (json.JSONDecodeError, TypeError):
+                        pass
         if self.cfg.get("manage_asset_truth_correction", True) and name == "manage_asset":
             if manage_asset.is_move_call(args):
                 msg = manage_asset.correct_response(msg, args, info.get("active"))

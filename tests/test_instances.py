@@ -73,6 +73,44 @@ def test_read_heartbeats_unparseable_last_heartbeat_is_none(tmp_path):
     assert hb["last_heartbeat"] is None
 
 
+def test_read_heartbeats_non_string_last_heartbeat_is_none(tmp_path):
+    # F3: a malformed status file (last_heartbeat as a number, not a string) must not
+    # crash the reader -- str.replace() on a non-string raises AttributeError, which
+    # escaped the narrower (TypeError, ValueError) catch.
+    (tmp_path / "unity-mcp-status-badtype1.json").write_text(json.dumps({
+        "unity_port": 6401, "project_path": "C:/proj/One/Assets", "project_name": "One",
+        "last_heartbeat": 12345,
+    }))
+    [hb] = instances.read_heartbeats(str(tmp_path))
+    assert hb["last_heartbeat"] is None
+
+
+def test_read_heartbeats_naive_timestamp_coerced_to_utc(tmp_path):
+    # F3: a naive (no offset) timestamp must be coerced tz-aware, or a later `now - ts`
+    # comparison raises TypeError (can't subtract naive from aware).
+    _write_hb(tmp_path, "naive111", 6401, "C:/proj/One", "One",
+              last_heartbeat="2026-07-17T12:00:00")  # no trailing Z / offset
+    [hb] = instances.read_heartbeats(str(tmp_path))
+    assert hb["last_heartbeat"].tzinfo is not None
+
+
+def test_live_instances_does_not_raise_with_non_string_heartbeat(tmp_path):
+    (tmp_path / "unity-mcp-status-badtype2.json").write_text(json.dumps({
+        "unity_port": 6401, "project_path": "C:/proj/One/Assets", "project_name": "One",
+        "last_heartbeat": 12345,
+    }))
+    now = datetime(2026, 7, 17, 12, 0, 0, tzinfo=timezone.utc)
+    assert instances.live_instances(str(tmp_path), now, 180) == []
+
+
+def test_live_instances_does_not_raise_with_naive_heartbeat(tmp_path):
+    _write_hb(tmp_path, "naive222", 6401, "C:/proj/One", "One",
+              last_heartbeat="2026-07-17T11:59:00")  # naive, 60s before `now`
+    now = datetime(2026, 7, 17, 12, 0, 0, tzinfo=timezone.utc)
+    live = instances.live_instances(str(tmp_path), now, 180)
+    assert [hb["hash"] for hb in live] == ["naive222"]
+
+
 def test_live_instances_filters_fresh_stale_and_missing(tmp_path):
     now = datetime(2026, 7, 17, 12, 0, 0, tzinfo=timezone.utc)
     _write_hb(tmp_path, "fresh111", 6401, "C:/proj/Fresh", "Fresh",
@@ -126,3 +164,12 @@ def test_guard_forwards_when_one_live():
 def test_guard_forwards_when_three_plus_live_but_pinned():
     assert instances.instance_guard_refusal(
         "Two@bbbb", "One@aaaa", 3, ["One@aaaa", "Two@bbbb", "Three@cccc"]) is None
+
+
+def test_guard_refuses_empty_string_per_call_instance():
+    # F6: downstream routing selects on truthiness (`per_call or active`), so an
+    # empty-string `unity_instance` must read as "no selector" here too -- an
+    # `is not None` check would let it forward while downstream treats it as absent,
+    # defeating the guard.
+    text = instances.instance_guard_refusal("", None, 2, ["One@aaaa", "Two@bbbb"])
+    assert text is not None

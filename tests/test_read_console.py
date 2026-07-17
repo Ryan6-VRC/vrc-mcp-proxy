@@ -247,6 +247,56 @@ def test_strip_response_types_not_enforced_on_plain_strings_notes_limitation():
     assert "types not enforced on plain-string entries" in trailer
 
 
+def test_strip_response_types_bare_string_filters():
+    # F1: `types` is schema-valid as a bare string, not just a list. Iterating a string
+    # yields characters ("error" -> {"e","r","o"}), which used to match nothing and drop
+    # the entire buffer.
+    entries = [
+        {"type": "Error", "message": "NullReferenceException at Foo", "stackTrace": "at X"},
+        {"type": "Log", "message": "ordinary log line", "stackTrace": ""},
+    ]
+    msg = _msg_for({"data": {"lines": entries}})
+    out = read_console.strip_response(msg, types="error")
+    payload = _payload_of(out)
+    lines = payload["data"]["lines"]
+    kept = [e for e in lines if "vrc-mcp-proxy" not in e.get("message", "")]
+    assert len(kept) == 1
+    assert kept[0]["message"] == "NullReferenceException at Foo"
+
+
+def test_strip_response_types_all_disables_type_filter():
+    # F1: types=["all"] means "don't type-filter", not a literal type to match.
+    entries = [
+        {"type": "Error", "message": "NullReferenceException at Foo", "stackTrace": "at X"},
+        {"type": "Log", "message": "ordinary log line", "stackTrace": ""},
+    ]
+    msg = _msg_for({"data": {"lines": entries}})
+    out = read_console.strip_response(msg, types=["all"])
+    payload = _payload_of(out)
+    lines = payload["data"]["lines"]
+    kept = [e for e in lines if "vrc-mcp-proxy" not in e.get("message", "")]
+    assert len(kept) == 2
+
+
+def test_strip_response_trailer_matches_dict_shape_when_all_entries_filtered():
+    # F7: when the client filter drops EVERY entry (client_dropped > 0, but nothing left
+    # to sample), the trailer must still match the buffer's dict shape, not silently
+    # degrade to a bare string mixed into a dict-format list.
+    entries = [
+        {"type": "Log", "message": "ordinary log line", "stackTrace": ""},
+        {"type": "Warning", "message": "another line", "stackTrace": ""},
+    ]
+    msg = _msg_for({"data": {"lines": entries}})
+    out = read_console.strip_response(msg, filter_text="nonexistent-text")
+    payload = _payload_of(out)
+    lines = payload["data"]["lines"]
+    assert len(lines) == 1
+    trailer = lines[0]
+    assert isinstance(trailer, dict)
+    assert "message" in trailer
+    assert "client filter" in trailer["message"]
+
+
 def test_client_filter_helper_types_and_text_combined():
     entries = [
         {"type": "Error", "message": "[MACS] noise", "stackTrace": ""},

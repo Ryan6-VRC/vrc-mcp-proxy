@@ -130,7 +130,15 @@ def _client_filter(entries, types, filter_text):
     """
     if not types and not filter_text:
         return entries, set(), 0, False
-    type_set = {str(t).lower() for t in types} if types else None
+    if types:
+        # `types` is schema-valid as a bare string, not just a list/tuple — iterating a
+        # bare string yields characters, which would silently match nothing (F1). Coerce
+        # to a list first. "all" means "don't type-filter", not a literal type to match.
+        raw = [types] if isinstance(types, str) else list(types)
+        lowered = {str(t).lower() for t in raw}
+        type_set = None if "all" in lowered else lowered
+    else:
+        type_set = None
     kept = []
     exempt_ids = set()
     dropped = 0
@@ -186,7 +194,8 @@ def _trailer_entry(counts, sample, client_dropped=0, plain_types_unenforced=Fals
     return entry
 
 
-def strip_payload(payload, client_dropped=0, plain_types_unenforced=False, exempt_ids=frozenset()):
+def strip_payload(payload, client_dropped=0, plain_types_unenforced=False, exempt_ids=frozenset(),
+                   format_sample=None):
     """Filter benign entries in-place-ish. Return (payload, counts_dict).
 
     `exempt_ids` (id() of entries kept by an explicit client `filter_text` match) are
@@ -194,6 +203,12 @@ def strip_payload(payload, client_dropped=0, plain_types_unenforced=False, exemp
     module docstring. `client_dropped`/`plain_types_unenforced` fold the client-filter
     outcome into the same single trailer (never silent), even when the benign-strip
     itself finds nothing to remove.
+
+    `format_sample` (F7): the trailer must be shaped like the buffer it lands in (plain
+    string vs. dict entry). When the client filter already dropped every entry, `entries`
+    here is empty and there's nothing left to sample the shape from — the caller passes
+    the pre-filter buffer's first entry instead so a dict-format buffer still gets a
+    dict-shaped trailer, not a mis-shaped bare string.
     """
     container, key, entries = _locate_entries(payload)
     if entries is None:
@@ -213,8 +228,8 @@ def strip_payload(payload, client_dropped=0, plain_types_unenforced=False, exemp
     counts = {k: v for k, v in counts.items() if v}
     if not counts and not client_dropped and not plain_types_unenforced:
         return payload, {}
-    kept.append(_trailer_entry(counts, entries[0] if entries else None,
-                                client_dropped, plain_types_unenforced))
+    sample = entries[0] if entries else format_sample
+    kept.append(_trailer_entry(counts, sample, client_dropped, plain_types_unenforced))
     return _reassign_entries(payload, container, key, entries, kept), counts
 
 
@@ -233,15 +248,17 @@ def strip_response(msg, types=None, filter_text=None):
     client_dropped = 0
     plain_types_unenforced = False
     exempt_ids = set()
+    format_sample = None
     if types or filter_text:
         container, key, entries = _locate_entries(payload)
         if entries is not None:
+            format_sample = entries[0] if entries else None
             kept, exempt_ids, client_dropped, plain_types_unenforced = _client_filter(
                 entries, types, filter_text)
             payload = _reassign_entries(payload, container, key, entries, kept)
 
     new_payload, counts = strip_payload(
-        payload, client_dropped, plain_types_unenforced, exempt_ids)
+        payload, client_dropped, plain_types_unenforced, exempt_ids, format_sample=format_sample)
     if not counts and not client_dropped and not plain_types_unenforced:
         return msg
     msg["result"]["content"][idx]["text"] = json.dumps(new_payload)

@@ -191,6 +191,19 @@ def test_delete_traversal_path_is_unverifiable(project):
     assert "could not verify" in p["proxy_note"]
 
 
+def test_delete_traversal_within_root_escaping_assets_is_unverifiable(project):
+    # F4: "Assets/../ProjectSettings/Foo.asset" normalizes to <root>/ProjectSettings/
+    # Foo.asset -- still inside the project root, so it used to pass the root-commonpath
+    # guard and get falsely truth-corrected (the target doesn't exist -> "both gone" ->
+    # success:true), despite escaping Assets/ itself.
+    root, hb = project
+    args = {"action": "delete", "path": "Assets/../ProjectSettings/Foo.asset"}
+    out = manage_asset.correct_delete_response(_delete_failure_msg(), args, None, directory=hb)
+    p = _payload(out)
+    assert p["success"] is False
+    assert "could not verify" in p["proxy_note"]
+
+
 def test_delete_success_response_untouched(project):
     root, hb = project
     args = {"action": "delete", "path": "Assets/Foo.mat"}

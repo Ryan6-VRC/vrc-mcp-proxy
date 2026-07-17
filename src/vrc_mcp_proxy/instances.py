@@ -12,7 +12,7 @@ itself routes on.
 import glob
 import json
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 
 DEFAULT_DIR = os.path.join(os.path.expanduser("~"), ".unity-mcp")
 
@@ -24,13 +24,22 @@ GUARD_WINDOW_S = 180
 
 
 def _parse_heartbeat(value):
-    """Parse the status JSON's `last_heartbeat` ISO-8601 string, or None on any failure."""
-    if not value:
+    """Parse the status JSON's `last_heartbeat` ISO-8601 string, or None on any failure.
+
+    A non-string value (e.g. a malformed status file with `last_heartbeat` as a number)
+    must not crash the caller — `str.replace` on a non-string raises `AttributeError`,
+    which escapes the narrower `(TypeError, ValueError)` catch below and, unhandled in
+    `main()`'s stdin loop, would kill the relay (F3). A naive (no-offset) timestamp is
+    coerced to UTC so a later `now - ts` (both must be tz-aware or both naive) never
+    raises either.
+    """
+    if not isinstance(value, str):
         return None
     try:
-        return datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except (TypeError, ValueError):
+        dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
         return None
+    return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
 
 
 def read_heartbeats(directory=None):
@@ -59,7 +68,7 @@ def read_heartbeats(directory=None):
     return out
 
 
-def live_instances(directory=None, now=None, window_s=180):
+def live_instances(directory=None, now=None, window_s=GUARD_WINDOW_S):
     """Heartbeats from `read_heartbeats` whose `last_heartbeat` is within `window_s`s of `now`.
 
     `now` is caller-supplied (never sampled here) so freshness checks are deterministic.
@@ -80,8 +89,14 @@ def instance_guard_refusal(per_call_instance, active_instance, live_count, live_
     session-pinned `active_instance`, and `live_count` (a probe-free heartbeat count from
     `live_instances`) is 2 or more. `live_names` are display strings (e.g. `Name@hash`)
     named in the refusal alongside the `set_active_instance` fix.
+
+    Truthiness, not `is not None` (F6): downstream routing selects on `per_call or
+    active` (falsy `""` treated as "no selector"), so an empty-string `unity_instance`
+    must read the same way here — an `is not None` check would let it forward as if a
+    selector were present while downstream still treats it as absent, defeating the
+    guard.
     """
-    if per_call_instance is not None or active_instance is not None or live_count < 2:
+    if per_call_instance or active_instance or live_count < 2:
         return None
     names = ", ".join(sorted(live_names))
     return (
