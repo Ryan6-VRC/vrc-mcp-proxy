@@ -26,6 +26,7 @@ BEHAVIORS = (
     "manage_asset_truth_correction",
     "read_console_strip",
     "timeout_notes",
+    "execute_code_watchdog",
 )
 
 

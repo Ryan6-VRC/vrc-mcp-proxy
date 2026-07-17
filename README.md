@@ -26,6 +26,7 @@ upstream pin.
 | `manage_asset_truth_correction` | tools/call resp | On a move/rename reported as failed, verifies on disk and rewrites a false failure to success. |
 | `read_console_strip` | tools/call resp | Drops known-benign console noise and appends a trailer naming what was stripped (never silent). |
 | `timeout_notes` | tools/call resp | Appends a note to timeout errors: the work may have run; verify on disk before retrying. |
+| `execute_code_watchdog` | tools/call req + timer | Per-call timer on an `execute_code` `action:"execute"` (default 120s, `VRC_MCP_PROXY_EXECUTE_TIMEOUT_S`). On expiry synthesizes a labeled timeout routing to `compiler:"codedom"` (→ editor restart if C#7+/mutating) and drops the late real response. Bounds the Roslyn background-compile hang; does not replace `timeout_notes` (the ~36s main-thread-block bounce). |
 
 ## Wiring it into `.mcp.json`
 

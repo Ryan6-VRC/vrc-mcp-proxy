@@ -39,7 +39,7 @@ class Sink:
         raise AssertionError(f"no response with id={rid}; got {self._lines}")
 
 
-def _proxy(cfg_overrides=None):
+def _proxy(cfg_overrides=None, execute_timeout_s=None):
     child = subprocess.Popen(
         [sys.executable, FAKE],
         stdin=subprocess.PIPE, stdout=subprocess.PIPE,
@@ -47,9 +47,15 @@ def _proxy(cfg_overrides=None):
     cfg = {b: False for b in config.BEHAVIORS}
     cfg.update(cfg_overrides or {})
     sink = Sink()
-    proxy = Proxy(cfg=cfg, child=child, client_out=sink)
+    proxy = Proxy(cfg=cfg, child=child, client_out=sink,
+                  execute_timeout_s=execute_timeout_s)
     threading.Thread(target=proxy.pump_child, daemon=True).start()
     return proxy, child, sink
+
+
+def _ids_in_sink(sink, rid):
+    with sink._lock:
+        return [json.loads(x) for x in sink._lines if json.loads(x).get("id") == rid]
 
 
 def test_tools_list_is_allowlist_filtered():
@@ -106,5 +112,69 @@ def test_allowed_tool_call_relays_through():
         resp = sink.wait_for_id(3)
         payload = json.loads(resp["result"]["content"][0]["text"])
         assert payload["tool"] == "execute_code" and payload["ok"] is True
+    finally:
+        child.terminate()
+
+
+def test_execute_watchdog_synthesizes_timeout_and_drops_late_response():
+    # An execute_code/execute call whose upstream response is withheld past the threshold
+    # gets a synthesized codedom-routing timeout; the late real response is then DROPPED.
+    proxy, child, sink = _proxy({"execute_code_watchdog": True}, execute_timeout_s=0.3)
+    try:
+        proxy.handle_client_line(json.dumps(
+            {"jsonrpc": "2.0", "id": 10, "method": "tools/call",
+             "params": {"name": "execute_code",
+                        "arguments": {"action": "execute", "code": "x", "hold": True}}}))
+        resp = sink.wait_for_id(10)
+        assert resp["result"]["isError"] is True
+        assert "codedom" in resp["result"]["content"][0]["text"]
+
+        # Release the withheld real response for id 10; it must be dropped, not forwarded.
+        # The release call (id 11) is emitted AFTER the withheld line, so once id 11 lands
+        # the real id-10 line has already been processed (and dropped) by the pump.
+        proxy.handle_client_line(json.dumps(
+            {"jsonrpc": "2.0", "id": 11, "method": "tools/call",
+             "params": {"name": "__release__", "arguments": {}}}))
+        sink.wait_for_id(11)
+        msgs = _ids_in_sink(sink, 10)
+        assert len(msgs) == 1  # only the synth; the late real response was dropped
+        assert msgs[0]["result"]["isError"] is True
+    finally:
+        child.terminate()
+
+
+def test_execute_watchdog_cancelled_on_fast_response():
+    # A fast execute_code/execute returns normally; the timer is cancelled — no synth.
+    proxy, child, sink = _proxy({"execute_code_watchdog": True}, execute_timeout_s=0.4)
+    try:
+        proxy.handle_client_line(json.dumps(
+            {"jsonrpc": "2.0", "id": 20, "method": "tools/call",
+             "params": {"name": "execute_code",
+                        "arguments": {"action": "execute", "code": "1+1"}}}))
+        resp = sink.wait_for_id(20)
+        assert resp["result"]["isError"] is False
+        assert json.loads(resp["result"]["content"][0]["text"])["ok"] is True
+        time.sleep(0.6)  # well past the threshold, had the timer not been cancelled
+        assert len(_ids_in_sink(sink, 20)) == 1  # no synth appended
+    finally:
+        child.terminate()
+
+
+def test_execute_watchdog_ignores_non_execute_action():
+    # A non-execute action (get_history) must NOT arm the watchdog: withheld past the
+    # threshold, no synth appears; released, the real response forwards cleanly.
+    proxy, child, sink = _proxy({"execute_code_watchdog": True}, execute_timeout_s=0.3)
+    try:
+        proxy.handle_client_line(json.dumps(
+            {"jsonrpc": "2.0", "id": 30, "method": "tools/call",
+             "params": {"name": "execute_code",
+                        "arguments": {"action": "get_history", "hold": True}}}))
+        time.sleep(0.8)  # past the threshold; an armed call would have synthesized by now
+        assert _ids_in_sink(sink, 30) == []
+        proxy.handle_client_line(json.dumps(
+            {"jsonrpc": "2.0", "id": 31, "method": "tools/call",
+             "params": {"name": "__release__", "arguments": {}}}))
+        real = sink.wait_for_id(30)
+        assert real["result"]["isError"] is False  # withheld, not dropped
     finally:
         child.terminate()

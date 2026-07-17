@@ -10,6 +10,10 @@ def respond(obj):
 
 
 def main():
+    # F52 watchdog harness: a call whose arguments carry `hold: true` has its real response
+    # WITHHELD (buffered) and emitted only on a later `__release__` call — so a test can prove
+    # the relay synthesizes a timeout for an armed id and DROPS the late real response.
+    withheld = []
     for line in sys.stdin:
         line = line.strip()
         if not line:
@@ -30,7 +34,21 @@ def main():
                 {"name": "generate_image", "inputSchema": {"type": "object"}},
             ]}})
         elif method == "tools/call":
-            name = (msg.get("params") or {}).get("name")
+            params = msg.get("params") or {}
+            name = params.get("name")
+            args = params.get("arguments") or {}
+            if name == "__release__":
+                for r in withheld:
+                    respond(r)
+                withheld.clear()
+                respond({"jsonrpc": "2.0", "id": rid, "result": {
+                    "content": [{"type": "text", "text": "released"}], "isError": False}})
+                continue
+            if isinstance(args, dict) and args.get("hold"):
+                withheld.append({"jsonrpc": "2.0", "id": rid, "result": {"content": [
+                    {"type": "text", "text": json.dumps(
+                        {"tool": name, "ok": True, "real": True})}], "isError": False}})
+                continue
             if name == "read_console":
                 # A strippable console payload (one benign MACS line + one real line) so
                 # the relay's strip gate can be exercised end-to-end.
