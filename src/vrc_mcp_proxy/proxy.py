@@ -20,6 +20,7 @@ from datetime import datetime, timezone
 from . import canary, config, instances
 from .allowlist import filter_tools_list, is_allowed, refusal_result
 from .envelope import (
+    first_text_payload,
     is_error_result,
     is_notification,
     is_request,
@@ -184,6 +185,18 @@ class Proxy:
         if name == "set_active_instance" and info.get("requested_instance") is not None \
                 and not is_error_result(msg):
             self.active_instance = info["requested_instance"]
+            # Surface the resolved project root on the pin itself (G50-B): a wrong pin is
+            # then legible from the tool result, not just from a later instance_guard block.
+            root = instances.resolve_project_root(info["requested_instance"], None)
+            text, idx = first_text_payload(msg)
+            if text is not None:
+                try:
+                    payload = json.loads(text)
+                    if isinstance(payload, dict):
+                        payload["proxy_project_root"] = root or "unresolved"
+                        msg["result"]["content"][idx]["text"] = json.dumps(payload)
+                except (json.JSONDecodeError, TypeError):
+                    pass
         if self.cfg.get("manage_asset_truth_correction", True) and \
                 name == "manage_asset" and manage_asset.is_move_call(args):
             msg = manage_asset.correct_response(msg, args, info.get("active"))

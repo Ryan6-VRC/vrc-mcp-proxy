@@ -191,3 +191,48 @@ def test_instance_guard_ignores_stale_heartbeats(tmp_path, monkeypatch):
 
     p.handle_client_line(_call_request(1, "manage_scene"))
     assert p.child.stdin.getvalue() != ""  # only one fresh editor -> forwards
+
+
+# --- G50-B: proxy_project_root surfaced on a successful pin ----------------
+def _json_response(rid, payload, is_error=False):
+    return json.dumps({"jsonrpc": "2.0", "id": rid, "result": {
+        "content": [{"type": "text", "text": json.dumps(payload)}], "isError": is_error}})
+
+
+def test_set_active_instance_success_gains_proxy_project_root(tmp_path, monkeypatch):
+    monkeypatch.setattr(instances, "DEFAULT_DIR", str(tmp_path))
+    _write_hb(tmp_path, "aaaa1111", 6401, "C:/proj/One", "One")
+    p = _proxy(_all_off())
+
+    p.handle_client_line(_set_active_request(1, "One@aaaa1111"))
+    p.handle_child_line(_json_response(1, {"ok": True}))
+
+    [line] = p.client_out.lines
+    payload = json.loads(json.loads(line)["result"]["content"][0]["text"])
+    assert payload == {"ok": True, "proxy_project_root": "C:/proj/One"}
+
+
+def test_set_active_instance_success_unresolved_root(tmp_path, monkeypatch):
+    monkeypatch.setattr(instances, "DEFAULT_DIR", str(tmp_path))
+    # No heartbeat file at all: the just-pinned instance can't be resolved on disk.
+    p = _proxy(_all_off())
+
+    p.handle_client_line(_set_active_request(1, "Ghost@dead0000"))
+    p.handle_child_line(_json_response(1, {"ok": True}))
+
+    [line] = p.client_out.lines
+    payload = json.loads(json.loads(line)["result"]["content"][0]["text"])
+    assert payload["proxy_project_root"] == "unresolved"
+
+
+def test_set_active_instance_error_response_unchanged(tmp_path, monkeypatch):
+    monkeypatch.setattr(instances, "DEFAULT_DIR", str(tmp_path))
+    _write_hb(tmp_path, "aaaa1111", 6401, "C:/proj/One", "One")
+    p = _proxy(_all_off())
+
+    p.handle_client_line(_set_active_request(1, "One@aaaa1111"))
+    p.handle_child_line(_json_response(1, {"error": "nope"}, is_error=True))
+
+    [line] = p.client_out.lines
+    payload = json.loads(json.loads(line)["result"]["content"][0]["text"])
+    assert "proxy_project_root" not in payload
