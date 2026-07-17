@@ -2,6 +2,7 @@
 newline-delimited JSON-RPC on stdin, emits canned responses on stdout. No Unity."""
 import json
 import sys
+import threading
 
 
 def respond(obj):
@@ -13,6 +14,12 @@ def main():
     # F52 watchdog harness: a call whose arguments carry `hold: true` has its real response
     # WITHHELD (buffered) and emitted only on a later `__release__` call — so a test can prove
     # the relay synthesizes a timeout for an armed id and DROPS the late real response.
+    #
+    # `delay_s: <seconds>` is a second, independent knob: the real response is emitted
+    # automatically after that many seconds on a background timer, WITHOUT blocking this
+    # read loop (so a later line, e.g. an id-reuse, is still read and processed immediately)
+    # and without touching the shared `withheld`/`__release__` mechanism (avoids a double
+    # response when a reused id also has a `hold: true` entry parked in `withheld`).
     withheld = []
     for line in sys.stdin:
         line = line.strip()
@@ -48,6 +55,14 @@ def main():
                 withheld.append({"jsonrpc": "2.0", "id": rid, "result": {"content": [
                     {"type": "text", "text": json.dumps(
                         {"tool": name, "ok": True, "real": True})}], "isError": False}})
+                continue
+            if isinstance(args, dict) and args.get("delay_s"):
+                resp = {"jsonrpc": "2.0", "id": rid, "result": {"content": [
+                    {"type": "text", "text": json.dumps(
+                        {"tool": name, "ok": True, "real": True})}], "isError": False}}
+                t = threading.Timer(float(args["delay_s"]), respond, args=(resp,))
+                t.daemon = True
+                t.start()
                 continue
             if name == "read_console":
                 # A strippable console payload (one benign MACS line + one real line) so

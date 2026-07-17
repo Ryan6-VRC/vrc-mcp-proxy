@@ -162,6 +162,56 @@ def test_execute_watchdog_cancelled_on_fast_response():
         child.terminate()
 
 
+def test_execute_watchdog_id_reuse_does_not_orphan_timer():
+    # Council-review Fix A: reusing an in-flight id must cancel the FIRST call's watchdog
+    # timer, not just overwrite the bookkeeping dicts. Otherwise the orphaned timer fires
+    # against the SECOND (still-live) call's pending entry, synthesizes a bogus timeout for
+    # it, and later drops its real response.
+    #
+    # id=X call 1 (hold=true, never released) arms timer T1 for execute_timeout_s=0.3,
+    # i.e. firing at ~t=0.3 (relative to test start, t=0).
+    # id=X call 2 (reused at t=0.1, delay_s=0.25 -> its real response lands at ~t=0.35)
+    # arms its own timer T2 at t=0.1, firing at ~t=0.4 if never cancelled.
+    #
+    # So T1's fire time (0.3) falls BEFORE call 2's real response (0.35): if T1 is not
+    # cancelled on reuse, it fires while call 2 is still legitimately in flight and
+    # mislabels it. T2's fire time (0.4) falls AFTER call 2's real response, so a
+    # correctly-operating watchdog never fires at all here.
+    proxy, child, sink = _proxy({"execute_code_watchdog": True}, execute_timeout_s=0.3)
+    try:
+        proxy.handle_client_line(json.dumps(
+            {"jsonrpc": "2.0", "id": 40, "method": "tools/call",
+             "params": {"name": "execute_code",
+                        "arguments": {"action": "execute", "code": "first", "hold": True}}}))
+        time.sleep(0.1)
+        proxy.handle_client_line(json.dumps(
+            {"jsonrpc": "2.0", "id": 40, "method": "tools/call",  # id reused before call 1 resolved
+             "params": {"name": "execute_code",
+                        "arguments": {"action": "execute", "code": "second",
+                                      "delay_s": 0.25}}}))
+
+        # Past T1's fire time (0.3 total), before call 2's real response (0.35 total): a
+        # cancelled T1 leaves the sink empty here; an orphaned T1 has already synthesized a
+        # bogus timeout for id 40 by now.
+        time.sleep(0.22)  # total elapsed ~0.32
+        assert _ids_in_sink(sink, 40) == [], (
+            "an orphaned watchdog timer from the superseded call fired against the live "
+            "call's id")
+
+        # Give call 2's real (delayed) response time to land, and T2 (a legitimate,
+        # uncancelled watchdog for call 2) time to have fired too, had it not been
+        # cancelled by call 2's own real response arriving first.
+        resp = sink.wait_for_id(40, timeout=2)
+        assert resp["result"]["isError"] is False, (
+            "the live call's real response was dropped (timed_out mis-marked by an "
+            "orphaned timer) instead of being delivered")
+        assert json.loads(resp["result"]["content"][0]["text"])["ok"] is True
+        time.sleep(0.2)  # past T2's fire time too; confirm nothing further gets appended
+        assert len(_ids_in_sink(sink, 40)) == 1
+    finally:
+        child.terminate()
+
+
 def test_execute_watchdog_ignores_non_execute_action():
     # A non-execute action (get_history) must NOT arm the watchdog: withheld past the
     # threshold, no synth appears; released, the real response forwards cleanly.

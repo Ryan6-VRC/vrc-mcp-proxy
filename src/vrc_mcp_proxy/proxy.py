@@ -11,6 +11,7 @@ Notifications, resources, prompts, initialize: pure passthrough. Child stderr ->
 stderr. Child dies -> we exit nonzero, loudly.
 """
 import json
+import math
 import os
 import subprocess
 import sys
@@ -51,13 +52,16 @@ _DEFAULT_EXECUTE_TIMEOUT_S = 120.0
 
 def _read_execute_timeout(env=None):
     """Read VRC_MCP_PROXY_EXECUTE_TIMEOUT_S, tolerant like load_config: an absent, unparseable,
-    or non-positive value falls back to the default and must never crash startup."""
+    non-positive, non-finite (inf/nan), or oversized (beyond threading.Timer's max) value
+    falls back to the default and must never crash startup. `inf` in particular must be
+    rejected here, not left to threading.Timer — passing it raises OverflowError on the
+    timer thread, which silently disables the watchdog instead of failing loudly."""
     env = os.environ if env is None else env
     raw = env.get("VRC_MCP_PROXY_EXECUTE_TIMEOUT_S")
     if raw is not None:
         try:
             val = float(raw)
-            if val > 0:
+            if math.isfinite(val) and 0 < val <= threading.TIMEOUT_MAX:
                 return val
         except (TypeError, ValueError):
             pass
@@ -241,6 +245,7 @@ class Proxy:
     # --- pending-request bookkeeping --------------------------------------
     def _remember(self, req_id, method, tool, args,
                   active_snapshot=None, requested_instance=None):
+        stale_timer = None
         with self._pending_lock:
             if req_id in self.pending:
                 self.log(
@@ -248,9 +253,20 @@ class Proxy:
                     f"clobbering the pending "
                     f"{self.pending[req_id].get('method')} entry — a response may now be "
                     f"mismatched. Upstream or client re-used an id.")
+                # The clobbered request may still have an armed F52 watchdog. Left alone,
+                # that orphaned timer later fires against THIS (new) request's pending
+                # entry — mislabelling it timed_out and dropping its real response. Clear
+                # the stale state now; _arm_watchdog (called after _remember returns, if
+                # the new request itself is an execute_code/execute call) then sets a
+                # fresh _timers[req_id] with no leak.
+                self.timed_out.discard(req_id)
+                stale_timer = self._timers.pop(req_id, None)
             self.pending[req_id] = {"method": method, "tool": tool, "args": args,
                                     "active": active_snapshot,
                                     "requested_instance": requested_instance}
+        # Cancel OUTSIDE the lock — _pending_lock is never held across other blocking work.
+        if stale_timer is not None:
+            stale_timer.cancel()
 
     def _take(self, req_id):
         """Pop the pending entry and, atomically under _pending_lock, read+clear timed_out

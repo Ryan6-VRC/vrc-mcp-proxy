@@ -7,7 +7,7 @@ import json
 import pytest
 
 from vrc_mcp_proxy import canary, config
-from vrc_mcp_proxy.proxy import Proxy
+from vrc_mcp_proxy.proxy import Proxy, _DEFAULT_EXECUTE_TIMEOUT_S, _read_execute_timeout
 
 
 class _FakeChild:
@@ -89,3 +89,21 @@ def test_duplicate_in_flight_id_logs():
     p._remember(7, "tools/call", "execute_code", {})
     p._remember(7, "tools/call", "read_console", {})  # id reused before first resolved
     assert any("duplicate in-flight JSON-RPC id" in m for m in logs)
+
+
+# --- council-review Fix B: inf/oversized VRC_MCP_PROXY_EXECUTE_TIMEOUT_S must not silently
+# disable the watchdog (threading.Timer(inf, ...) raises OverflowError in the timer thread) --
+def test_read_execute_timeout_rejects_infinity(monkeypatch):
+    monkeypatch.setenv("VRC_MCP_PROXY_EXECUTE_TIMEOUT_S", "inf")
+    assert _read_execute_timeout() == _DEFAULT_EXECUTE_TIMEOUT_S
+
+
+def test_read_execute_timeout_rejects_oversized_value(monkeypatch):
+    import threading
+    monkeypatch.setenv("VRC_MCP_PROXY_EXECUTE_TIMEOUT_S", str(threading.TIMEOUT_MAX * 2))
+    assert _read_execute_timeout() == _DEFAULT_EXECUTE_TIMEOUT_S
+
+
+def test_read_execute_timeout_still_accepts_a_normal_value(monkeypatch):
+    monkeypatch.setenv("VRC_MCP_PROXY_EXECUTE_TIMEOUT_S", "45")
+    assert _read_execute_timeout() == 45.0
