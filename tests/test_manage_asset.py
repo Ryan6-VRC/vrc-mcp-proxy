@@ -210,3 +210,50 @@ def test_delete_success_response_untouched(project):
     msg = _failure_msg({"success": True})
     out = manage_asset.correct_delete_response(msg, args, None, directory=hb)
     assert "proxy_note" not in _payload(out)
+
+
+# --- Fix 3: os.path.exists() can't prove "gone" -- lstat three-state -------
+def test_delete_unverifiable_lstat_failure_not_rewritten(project, monkeypatch):
+    # Neither the asset nor its .meta exist for real, so the old os.path.exists() check
+    # would happily rewrite this to success. But the target's lstat fails with something
+    # other than FileNotFoundError (e.g. a permission/IO error) -- that's "couldn't tell",
+    # not "confirmed gone", and must NOT be truth-corrected.
+    root, hb = project
+    target = str(root / "Assets" / "Foo.mat")
+    real_lstat = os.lstat
+
+    def fake_lstat(path, *a, **k):
+        if os.path.normpath(str(path)) == os.path.normpath(target):
+            raise PermissionError("denied")
+        return real_lstat(path, *a, **k)
+
+    monkeypatch.setattr(os, "lstat", fake_lstat)
+    args = {"action": "delete", "path": "Assets/Foo.mat"}
+    out = manage_asset.correct_delete_response(_delete_failure_msg(), args, None, directory=hb)
+    p = _payload(out)
+    assert p["success"] is False
+    assert "could not confirm" in p["proxy_note"]
+
+
+def test_move_unverifiable_lstat_failure_not_rewritten(project, monkeypatch):
+    # dest exists and src genuinely doesn't -- the old os.path.exists() check would rewrite
+    # this to success. But the src's lstat fails with a non-FileNotFoundError OSError, so
+    # it must be left as an unverifiable failure instead.
+    root, hb = project
+    dst = root / "Assets" / "Bar" / "a.mat"
+    dst.parent.mkdir(parents=True)
+    dst.write_text("moved")
+    src_target = str(root / "Assets" / "Foo" / "a.mat")
+    real_lstat = os.lstat
+
+    def fake_lstat(path, *a, **k):
+        if os.path.normpath(str(path)) == os.path.normpath(src_target):
+            raise PermissionError("denied")
+        return real_lstat(path, *a, **k)
+
+    monkeypatch.setattr(os, "lstat", fake_lstat)
+    args = {"action": "move", "path": "Assets/Foo/a.mat", "destination": "Assets/Bar/a.mat"}
+    out = manage_asset.correct_response(_failure_msg(), args, None, directory=hb)
+    p = _payload(out)
+    assert p["success"] is False
+    assert "could not confirm" in p["proxy_note"]

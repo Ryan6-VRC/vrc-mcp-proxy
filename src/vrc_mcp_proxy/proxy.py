@@ -187,10 +187,10 @@ class Proxy:
             self.active_instance = info["requested_instance"]
             # Surface the resolved project root on the pin itself (G50-B): a wrong pin is
             # then legible from the tool result, not just from a later instance_guard block.
-            # Gated on instance_guard (F5): it's part of the same G50 instance-targeting
-            # story as the guard refusal, and every behavior here must be independently
-            # disableable via VRC_MCP_PROXY_DISABLE.
-            if self.cfg.get("instance_guard", True):
+            # Gated on its own `proxy_project_root` behavior (F7), not instance_guard —
+            # the two are independently disableable via VRC_MCP_PROXY_DISABLE and must not
+            # be coupled under one toggle.
+            if self.cfg.get("proxy_project_root", True):
                 root = instances.resolve_project_root(info["requested_instance"], None)
                 text, idx = first_text_payload(msg)
                 if text is not None:

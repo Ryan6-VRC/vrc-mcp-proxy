@@ -76,6 +76,21 @@ def _resolve_asset_path(project_root, asset_path):
     return abs_path
 
 
+def _exists_state(path):
+    """Three-state existence check via os.lstat: True (exists), False (confirmed gone --
+    FileNotFoundError), or None (unverifiable -- any other OSError, e.g. a permission or
+    I/O failure). os.path.exists() collapses "confirmed gone" and "couldn't tell" into the
+    same False, which a truth-correction can't safely rewrite on (a dangling symlink or a
+    stat failure must not be read as proof the asset is gone)."""
+    try:
+        os.lstat(path)
+        return True
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return None
+
+
 def _dest_path(src, destination):
     # move: destination is a full (possibly prefix-less) asset path. rename: may be a bare
     # new name, renaming in place (sibling of src). Empty/missing destination has no target
@@ -123,23 +138,30 @@ def correct_response(msg, arguments, active_instance, directory=None):
                 "proxy could not verify on disk: an asset path is absolute or escapes the "
                 "project (traversal) — unverifiable, the reported failure is left as-is."
             )
-        elif os.path.exists(dst_abs) and not os.path.exists(src_abs):
-            payload["success"] = True
-            # A success:true payload must not keep live error/code keys — that shape
-            # invites misreading. Preserve the upstream strings under upstream_* instead.
-            for key in ("error", "code"):
-                if key in payload:
-                    payload[f"upstream_{key}"] = payload.pop(key)
-            payload["proxy_note"] = (
-                f"upstream reported failure but the move succeeded on disk "
-                f"(verified {src_rel} -> {dst_rel})"
-            )
         else:
-            payload["proxy_note"] = (
-                f"disk state verified consistent with the reported failure "
-                f"(source exists={os.path.exists(src_abs)}, dest exists="
-                f"{os.path.exists(dst_abs)}); move did not occur."
-            )
+            src_state = _exists_state(src_abs)
+            if src_state is None:
+                payload["proxy_note"] = (
+                    f"proxy could not confirm disk state for {src_rel} (lstat failed) — "
+                    f"unverifiable, the reported failure is left as-is."
+                )
+            elif os.path.exists(dst_abs) and not src_state:
+                payload["success"] = True
+                # A success:true payload must not keep live error/code keys — that shape
+                # invites misreading. Preserve the upstream strings under upstream_* instead.
+                for key in ("error", "code"):
+                    if key in payload:
+                        payload[f"upstream_{key}"] = payload.pop(key)
+                payload["proxy_note"] = (
+                    f"upstream reported failure but the move succeeded on disk "
+                    f"(verified {src_rel} -> {dst_rel})"
+                )
+            else:
+                payload["proxy_note"] = (
+                    f"disk state verified consistent with the reported failure "
+                    f"(source exists={src_state}, dest exists="
+                    f"{os.path.exists(dst_abs)}); move did not occur."
+                )
 
     msg["result"]["content"][idx]["text"] = json.dumps(payload)
     return msg
@@ -181,9 +203,14 @@ def correct_delete_response(msg, arguments, active_instance, directory=None):
             )
         else:
             meta_abs = abs_path + ".meta"
-            asset_gone = not os.path.exists(abs_path)
-            meta_gone = not os.path.exists(meta_abs)
-            if asset_gone and meta_gone:
+            asset_state = _exists_state(abs_path)
+            meta_state = _exists_state(meta_abs)
+            if asset_state is None or meta_state is None:
+                payload["proxy_note"] = (
+                    f"proxy could not confirm disk state for {path_rel} (lstat failed) — "
+                    f"unverifiable, the reported failure is left as-is."
+                )
+            elif asset_state is False and meta_state is False:
                 payload["success"] = True
                 # A success:true payload must not keep live error/code keys — that shape
                 # invites misreading. Preserve the upstream strings under upstream_* instead.
@@ -194,7 +221,7 @@ def correct_delete_response(msg, arguments, active_instance, directory=None):
                     f"upstream reported failure but {path_rel} and its .meta are both "
                     f"gone on disk — success inferred from absence, not observed."
                 )
-            elif asset_gone:  # asset gone, .meta still present: unclean delete
+            elif asset_state is False:  # asset gone, .meta still present: unclean delete
                 payload["proxy_note"] = (
                     f"disk state inconsistent with a clean delete: {path_rel} is gone "
                     f"but its .meta remains — not truth-corrected."

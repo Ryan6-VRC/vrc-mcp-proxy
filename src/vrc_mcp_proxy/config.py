@@ -27,6 +27,7 @@ BEHAVIORS = (
     "read_console_strip",
     "timeout_notes",
     "instance_guard",
+    "proxy_project_root",
 )
 
 

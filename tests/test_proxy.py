@@ -114,6 +114,7 @@ def _call_request(rid, name, arguments=None):
 def _guard_cfg():
     cfg = _all_off()
     cfg["instance_guard"] = True
+    cfg["proxy_project_root"] = True
     return cfg
 
 
@@ -202,7 +203,7 @@ def _json_response(rid, payload, is_error=False):
 def test_set_active_instance_success_gains_proxy_project_root(tmp_path, monkeypatch):
     monkeypatch.setattr(instances, "DEFAULT_DIR", str(tmp_path))
     _write_hb(tmp_path, "aaaa1111", 6401, "C:/proj/One", "One")
-    p = _proxy(_guard_cfg())  # proxy_project_root is gated on instance_guard (F5)
+    p = _proxy(_guard_cfg())  # proxy_project_root has its own behavior toggle (F7)
 
     p.handle_client_line(_set_active_request(1, "One@aaaa1111"))
     p.handle_child_line(_json_response(1, {"ok": True}))
@@ -238,12 +239,12 @@ def test_set_active_instance_error_response_unchanged(tmp_path, monkeypatch):
     assert "proxy_project_root" not in payload
 
 
-# --- F5: proxy_project_root must be gated on instance_guard, not unconditional ----------
-def test_set_active_instance_success_no_proxy_project_root_when_guard_disabled(
+# --- F7: proxy_project_root is its own behavior, decoupled from instance_guard ----------
+def test_set_active_instance_success_no_proxy_project_root_when_disabled(
         tmp_path, monkeypatch):
     monkeypatch.setattr(instances, "DEFAULT_DIR", str(tmp_path))
     _write_hb(tmp_path, "aaaa1111", 6401, "C:/proj/One", "One")
-    cfg = config.load_config(env={"VRC_MCP_PROXY_DISABLE": "instance_guard"})
+    cfg = config.load_config(env={"VRC_MCP_PROXY_DISABLE": "proxy_project_root"})
     p = _proxy(cfg)
 
     p.handle_client_line(_set_active_request(1, "One@aaaa1111"))
@@ -255,3 +256,20 @@ def test_set_active_instance_success_no_proxy_project_root_when_guard_disabled(
     assert "proxy_project_root" not in payload
     # the active_instance commit itself is a separate concern and must still happen
     assert p.active_instance == "One@aaaa1111"
+
+
+def test_set_active_instance_proxy_project_root_survives_instance_guard_disabled(
+        tmp_path, monkeypatch):
+    # Disabling instance_guard alone must NOT remove proxy_project_root -- the two
+    # behaviors are independently toggleable (previously both hung off instance_guard).
+    monkeypatch.setattr(instances, "DEFAULT_DIR", str(tmp_path))
+    _write_hb(tmp_path, "aaaa1111", 6401, "C:/proj/One", "One")
+    cfg = config.load_config(env={"VRC_MCP_PROXY_DISABLE": "instance_guard"})
+    p = _proxy(cfg)
+
+    p.handle_client_line(_set_active_request(1, "One@aaaa1111"))
+    p.handle_child_line(_json_response(1, {"ok": True}))
+
+    [line] = p.client_out.lines
+    payload = json.loads(json.loads(line)["result"]["content"][0]["text"])
+    assert payload["proxy_project_root"] == "C:/proj/One"
