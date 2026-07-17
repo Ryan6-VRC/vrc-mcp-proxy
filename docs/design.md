@@ -37,10 +37,22 @@ JSON-RPC both ways. Three layers, in order:
 | F9 console mis-tag + benign noise | `InferTypeFromMessage` still substring-matches "Exception"; MACS/FBX noise unchanged. | **Console-strip** (read_console response transform): drop known-benign lines (seeded from unity.md §Sharp edges), append one trailer naming what was stripped and the count — never silent. |
 | F44 `types`/`filter_text` no-ops | Confirmed: upstream's `read_console` `types`/`filter_text` request params are **ignored** — the full buffer returns regardless. | **Console-strip, extended**: enforces `types`/`filter_text` itself, applied *before* the benign-strip so a client filtering *for* benign noise (e.g. `filter_text:"MACS"`) still sees it — a `filter_text` match is exempt from the benign-strip that would otherwise remove it. `types` is enforced only on the detailed/dict format (explicit type field); the plain-string format can't carry it, noted in the trailer. Folds into the same one trailer, never silent. |
 | G28 empty scene | `NewSceneSetup.EmptyScene` hardcoded; server instruction is advisory fiction. | **None.** One-line doc caveat. |
+| F52 Roslyn background-compile hang | Editor stays responsive but `execute_code` under the default (Roslyn) compiler can enter a per-editor state where the compile never returns — upstream sends nothing, so it rides to the client's 1800s idle cap. **Ground truth:** run-5 T6, two consecutive calls hung ~1800s each; codedom ran the identical snippet in 2.8s. Distinct from the main-thread-block mode (`.Result`/modal), which upstream bounces at ~36s. | **`execute_code_watchdog`** (request-armed timer): on an `action:"execute"` call, a per-call timer (default 120s, `VRC_MCP_PROXY_EXECUTE_TIMEOUT_S`, tolerant parse) synthesizes a labeled timeout on expiry that routes to `compiler:"codedom"` (→ editor restart if C#7+/mutating), then drops the late real response. Retires **no** doc line — it converts a ~30-min silent hang into a bounded, labeled timeout naming the recovery; it does **not** replace `timeout_notes` (still the ~36s main-thread-block note). |
 
 Rejected: MCP-layer retry-dedup journal (the MCP client never re-sends `tools/call`; the
 model's own deliberate retries must not be suppressed, and upstream's re-send is invisible
 at this layer). Rejected: timeout config as a G21/G22 fix (no stdio knobs upstream).
+
+**Watchdog id-uniqueness boundary** (documented, not fixed): the F52 watchdog's
+exactly-once + late-drop guarantee is keyed purely on the client's JSON-RPC request id, so
+it assumes ids stay unique while in flight — true for every compliant MCP client, Claude
+Code included. A client that reuses an id already armed/fired collapses the two calls into
+one id-space: the reused id's own bookkeeping overwrites the original call's, so that
+call's late real response (if it ever arrives) is no longer recognizable as stale and
+passes through instead of being dropped. Not evidenced to matter in practice — F52's own
+retry path (resending the suggested `codedom` snippet) is a new `tools/call` with a new
+id, never a reused one. Pinned by
+`test_execute_watchdog_id_reuse_after_fire_late_response_not_dropped`.
 
 ## Allowlist (transcript census, strict-call counts)
 

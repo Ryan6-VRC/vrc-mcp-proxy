@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from vrc_mcp_proxy import canary, config, instances
-from vrc_mcp_proxy.proxy import Proxy
+from vrc_mcp_proxy.proxy import Proxy, _DEFAULT_EXECUTE_TIMEOUT_S, _read_execute_timeout
 
 
 class _FakeChild:
@@ -92,6 +92,22 @@ def test_duplicate_in_flight_id_logs():
     assert any("duplicate in-flight JSON-RPC id" in m for m in logs)
 
 
+# --- council-review Fix B: inf/oversized VRC_MCP_PROXY_EXECUTE_TIMEOUT_S must not silently
+# disable the watchdog (threading.Timer(inf, ...) raises OverflowError in the timer thread) --
+def test_read_execute_timeout_rejects_infinity(monkeypatch):
+    monkeypatch.setenv("VRC_MCP_PROXY_EXECUTE_TIMEOUT_S", "inf")
+    assert _read_execute_timeout() == _DEFAULT_EXECUTE_TIMEOUT_S
+
+
+def test_read_execute_timeout_rejects_oversized_value(monkeypatch):
+    import threading
+    monkeypatch.setenv("VRC_MCP_PROXY_EXECUTE_TIMEOUT_S", str(threading.TIMEOUT_MAX * 2))
+    assert _read_execute_timeout() == _DEFAULT_EXECUTE_TIMEOUT_S
+
+
+def test_read_execute_timeout_still_accepts_a_normal_value(monkeypatch):
+    monkeypatch.setenv("VRC_MCP_PROXY_EXECUTE_TIMEOUT_S", "45")
+    assert _read_execute_timeout() == 45.0
 # --- instance_guard: proxy wiring (G50-A) -----------------------------------
 # live_instances reads the real ~/.unity-mcp dir via instances.DEFAULT_DIR at call time,
 # so tests point it at a tmp dir with monkeypatch (least-invasive seam; matches the

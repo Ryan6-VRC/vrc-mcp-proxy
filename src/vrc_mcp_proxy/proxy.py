@@ -11,6 +11,7 @@ Notifications, resources, prompts, initialize: pure passthrough. Child stderr ->
 stderr. Child dies -> we exit nonzero, loudly.
 """
 import json
+import math
 import os
 import subprocess
 import sys
@@ -28,9 +29,50 @@ from .envelope import (
 )
 from .transforms import execute_code, manage_asset, read_console, timeouts
 
+# The F52 watchdog synth. Fingerprints the Roslyn background-compile hang and routes to the
+# proven recovery (codedom retry → editor restart), not "retry is safe". See docs/design.md.
+# {threshold} is interpolated at fire time with the live (env-overridable) deadline so the
+# note never states a number that disagrees with VRC_MCP_PROXY_EXECUTE_TIMEOUT_S.
+WATCHDOG_NOTE = (
+    "execute_code exceeded {threshold}s with no response — this fingerprints the Roslyn "
+    "background-compile hang (the editor is likely fine; other tools respond). Retry "
+    '**this snippet** with `compiler:"codedom"`, which bypasses it. If the snippet '
+    "mutated, verify on disk before re-running. If codedom rejects the syntax (C#7+) or "
+    "you can't safely re-run, restart the editor — the hang is per-editor Roslyn state."
+)
+
+
+def _watchdog_note(threshold_s):
+    """The synth text with the live threshold interpolated (`:g` drops a trailing .0)."""
+    return WATCHDOG_NOTE.format(threshold=f"{threshold_s:g}")
+
+# Default watchdog threshold: comfortably above the ~36s upstream main-thread bounce and
+# normal compiles, far below the 1800s client idle cap. Only F52-class background-compile
+# hangs live in that gap, so a synth here is near-false-positive-free.
+_DEFAULT_EXECUTE_TIMEOUT_S = 120.0
+
+
+def _read_execute_timeout(env=None):
+    """Read VRC_MCP_PROXY_EXECUTE_TIMEOUT_S, tolerant like load_config: an absent, unparseable,
+    non-positive, non-finite (inf/nan), or oversized (beyond threading.Timer's max) value
+    falls back to the default and must never crash startup. `inf` in particular must be
+    rejected here, not left to threading.Timer — passing it raises OverflowError on the
+    timer thread, which silently disables the watchdog instead of failing loudly."""
+    env = os.environ if env is None else env
+    raw = env.get("VRC_MCP_PROXY_EXECUTE_TIMEOUT_S")
+    if raw is not None:
+        try:
+            val = float(raw)
+            if math.isfinite(val) and 0 < val <= threading.TIMEOUT_MAX:
+                return val
+        except (TypeError, ValueError):
+            pass
+    return _DEFAULT_EXECUTE_TIMEOUT_S
+
 
 class Proxy:
-    def __init__(self, cfg=None, child=None, client_out=None, log=None):
+    def __init__(self, cfg=None, child=None, client_out=None, log=None,
+                 execute_timeout_s=None):
         self.cfg = cfg if cfg is not None else config.load_config()
         self.child = child
         self.client_out = client_out if client_out is not None else sys.stdout
@@ -44,6 +86,11 @@ class Proxy:
         self.pending = {}          # request id -> {"method","tool","args"}
         self.active_instance = None
         self.drifted = set()
+        # F52 execute_code watchdog state (all guarded by _pending_lock, correlated by id):
+        self.timed_out = set()     # ids the watchdog fired for; the late real response is dropped
+        self._timers = {}          # id -> threading.Timer (cancelled on a normal response)
+        self._execute_timeout_s = (
+            execute_timeout_s if execute_timeout_s is not None else _read_execute_timeout())
         self._pending_lock = threading.Lock()
         self._out_lock = threading.Lock()
 
@@ -138,6 +185,12 @@ class Proxy:
         self._remember(req_id, "tools/call", name, arguments,
                        active_snapshot=self.active_instance,
                        requested_instance=requested_instance)
+        # F52 watchdog: arm ONLY on execute_code/execute (the exact gate execute_code.py:88
+        # transforms on). Armed before forwarding so pending+timer are set before the child
+        # can respond; a fast response cancels it in _take.
+        if self.cfg.get("execute_code_watchdog", True) and name == "execute_code" \
+                and isinstance(arguments, dict) and arguments.get("action") == "execute":
+            self._arm_watchdog(req_id)
         self._write_child(msg)
 
     # --- response path (child -> client) ----------------------------------
@@ -156,7 +209,12 @@ class Proxy:
             self._write_client(msg)
             return
 
-        info = self._take(msg["id"])
+        info, was_timed_out = self._take(msg["id"])
+        # Check timed_out BEFORE the info-is-None passthrough: the watchdog already
+        # synthesized a labeled timeout for this id, so drop the late real response (the
+        # client saw exactly one result). Decided OUTSIDE the lock.
+        if was_timed_out:
+            return
         if info is None:
             self._write_client(msg)
             return
@@ -219,6 +277,7 @@ class Proxy:
     # --- pending-request bookkeeping --------------------------------------
     def _remember(self, req_id, method, tool, args,
                   active_snapshot=None, requested_instance=None):
+        stale_timer = None
         with self._pending_lock:
             if req_id in self.pending:
                 self.log(
@@ -226,13 +285,79 @@ class Proxy:
                     f"clobbering the pending "
                     f"{self.pending[req_id].get('method')} entry — a response may now be "
                     f"mismatched. Upstream or client re-used an id.")
+                # The clobbered request may still have an armed F52 watchdog. Left alone,
+                # that orphaned timer later fires against THIS (new) request's pending
+                # entry — mislabelling it timed_out and dropping its real response. Clear
+                # the stale state now; _arm_watchdog (called after _remember returns, if
+                # the new request itself is an execute_code/execute call) then sets a
+                # fresh _timers[req_id] with no leak.
+                #
+                # Boundary this does NOT close (documented, not fixed — see docs/design.md
+                # "watchdog id-uniqueness boundary" and _watchdog_fire below): if the
+                # watchdog had ALREADY fired for req_id before this reuse, the clobbered
+                # entry is that fire's tombstone, not a live call — clobbering it here is
+                # correct for the new call, but it also destroys the only state that would
+                # have let a still-outstanding late response from the FIRST call be
+                # recognized and dropped. That id-sharing is inherent to reusing an
+                # in-flight id and assumed away: compliant MCP clients (Claude Code
+                # included) never do it, and F52's own retry path always mints a new id.
+                self.timed_out.discard(req_id)
+                stale_timer = self._timers.pop(req_id, None)
             self.pending[req_id] = {"method": method, "tool": tool, "args": args,
                                     "active": active_snapshot,
                                     "requested_instance": requested_instance}
+        # Cancel OUTSIDE the lock — _pending_lock is never held across other blocking work.
+        if stale_timer is not None:
+            stale_timer.cancel()
 
     def _take(self, req_id):
+        """Pop the pending entry and, atomically under _pending_lock, read+clear timed_out
+        membership and detach any live watchdog timer. Returns (info, was_timed_out); the
+        caller decides drop-vs-forward OUTSIDE the lock. Timer.cancel() is a no-op if the
+        timer already fired (that race is caught by _watchdog_fire's pending re-check)."""
         with self._pending_lock:
-            return self.pending.pop(req_id, None)
+            info = self.pending.pop(req_id, None)
+            was_timed_out = req_id in self.timed_out
+            self.timed_out.discard(req_id)
+            timer = self._timers.pop(req_id, None)
+        if timer is not None:
+            timer.cancel()
+        return info, was_timed_out
+
+    # --- F52 execute_code watchdog ----------------------------------------
+    def _arm_watchdog(self, req_id):
+        timer = threading.Timer(self._execute_timeout_s, self._watchdog_fire, args=(req_id,))
+        timer.daemon = True
+        with self._pending_lock:
+            self._timers[req_id] = timer
+        timer.start()
+
+    def _watchdog_fire(self, req_id):
+        """Timer thread. If the id is still pending, mark it timed-out, reap the now-dead
+        Timer plus the (possibly large) transformed code/args down to a minimal tombstone,
+        and synthesize a labeled timeout to the client. NEVER fully pop pending — the id
+        must stay correlated (even if its payload is gone) so a late real response is
+        still recognized and dropped by handle_child_line, which returns on `was_timed_out`
+        before ever reading the tombstone's fields. NEVER hold _pending_lock across
+        _write_client (which takes _out_lock): the lock is released before the write.
+
+        Council round-2 item 2: without this reap, a permanently-hung call (upstream truly
+        never responds — the watchdog's target case) leaked pending[id] and _timers[id]
+        for the rest of the session; only a response arriving (_take) ever cleared them,
+        and a genuine hang has none. Bounded per-hang, but accumulates over a long session.
+
+        Council round-2 item 1 (id-uniqueness boundary): this tombstone is also the exact
+        state a same-id reuse clobbers in _remember (see the comment there) — the two
+        items share one root, an in-flight id assumed unique. See docs/design.md and
+        test_execute_watchdog_id_reuse_after_fire_late_response_not_dropped."""
+        with self._pending_lock:
+            if req_id not in self.pending:
+                return  # the real response already arrived and _take ran; nothing to synth
+            self.timed_out.add(req_id)
+            self._timers.pop(req_id, None)  # already fired; nothing left to cancel
+            self.pending[req_id] = {"method": "tools/call", "tool": None, "args": None}
+        self._write_client(
+            tool_error_result(req_id, _watchdog_note(self._execute_timeout_s)))
 
     # --- pump loop (child -> client) --------------------------------------
     def pump_child(self):
