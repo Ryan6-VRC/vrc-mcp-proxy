@@ -20,7 +20,10 @@ _USING_DIRECTIVE = re.compile(
 USING_REFUSAL_TEXT = (
     "execute_code runs your snippet as a method body — using directives cannot appear "
     "there. Remove them and fully-qualify; pre-imported: System, "
-    "System.Collections.Generic, System.Linq, System.Reflection, UnityEngine, UnityEditor."
+    "System.Collections.Generic, System.Linq, System.Reflection, UnityEngine, UnityEditor. "
+    "The agent/avatar tool doors are NOT pre-imported — fully-qualify each call with its "
+    "type namespace: Ryan6Vrc.AgentTools.Editor.<Tool> (agent-tools) or "
+    "Ryan6Vrc.AvatarTools.Editor.<Tool> (avatar-tools)."
 )
 
 

@@ -22,6 +22,10 @@ def test_transform_refuses_using():
     assert action == "refuse"
     assert "using directives cannot appear" in payload
     assert "UnityEditor" in payload  # names the pre-imported set
+    # names the not-pre-imported tool namespaces so a reflexive `using Ryan6Vrc...`
+    # gets handed the exact fully-qualified prefix (the recurring .Editor/casing stumble)
+    assert "Ryan6Vrc.AgentTools.Editor" in payload
+    assert "Ryan6Vrc.AvatarTools.Editor" in payload
 
 
 def test_transform_wraps_ordinary_snippet():
