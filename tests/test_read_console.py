@@ -177,6 +177,26 @@ def test_strip_response_types_filter_keeps_only_matching_type():
     assert "dropped 2" in trailer["message"]
 
 
+def test_strip_response_types_only_does_not_carry_filter_text_exemption():
+    # Exemption-scoping property: types=["error"] with NO filter_text narrows by type,
+    # but a types-only match is not exempt from the benign-strip -- the MACS-tagged
+    # Error is still dropped by the benign-strip (only filter_text matches are exempt),
+    # while the ordinary Log is dropped by the type filter itself. Only the real Error
+    # survives.
+    entries = [
+        {"type": "Error", "message": "[MACS] Failed to apply patch to Foo.cs", "stackTrace": ""},
+        {"type": "Error", "message": "Real error: NullReferenceException", "stackTrace": "at X"},
+        {"type": "Log", "message": "ordinary log line", "stackTrace": ""},
+    ]
+    msg = _msg_for({"data": {"lines": entries}})
+    out = read_console.strip_response(msg, types=["error"])
+    payload = _payload_of(out)
+    lines = payload["data"]["lines"]
+    kept = [e for e in lines if "vrc-mcp-proxy" not in e.get("message", "")]
+    assert len(kept) == 1
+    assert kept[0]["message"] == "Real error: NullReferenceException"
+
+
 def test_strip_response_filter_text_matching_benign_line_survives():
     # Test (b): filter_text="MACS" over a buffer with a benign MACS line -> the MACS
     # line SURVIVES, because the client filter runs (and exempts it) before the strip.
