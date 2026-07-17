@@ -259,6 +259,16 @@ class Proxy:
                 # the stale state now; _arm_watchdog (called after _remember returns, if
                 # the new request itself is an execute_code/execute call) then sets a
                 # fresh _timers[req_id] with no leak.
+                #
+                # Boundary this does NOT close (documented, not fixed — see docs/design.md
+                # "watchdog id-uniqueness boundary" and _watchdog_fire below): if the
+                # watchdog had ALREADY fired for req_id before this reuse, the clobbered
+                # entry is that fire's tombstone, not a live call — clobbering it here is
+                # correct for the new call, but it also destroys the only state that would
+                # have let a still-outstanding late response from the FIRST call be
+                # recognized and dropped. That id-sharing is inherent to reusing an
+                # in-flight id and assumed away: compliant MCP clients (Claude Code
+                # included) never do it, and F52's own retry path always mints a new id.
                 self.timed_out.discard(req_id)
                 stale_timer = self._timers.pop(req_id, None)
             self.pending[req_id] = {"method": method, "tool": tool, "args": args,
@@ -291,14 +301,29 @@ class Proxy:
         timer.start()
 
     def _watchdog_fire(self, req_id):
-        """Timer thread. If the id is still pending, mark it timed-out and synthesize a
-        labeled timeout to the client. NEVER pop pending — the late real response must stay
-        correlated so handle_child_line can drop it. NEVER hold _pending_lock across
-        _write_client (which takes _out_lock): the lock is released before the write."""
+        """Timer thread. If the id is still pending, mark it timed-out, reap the now-dead
+        Timer plus the (possibly large) transformed code/args down to a minimal tombstone,
+        and synthesize a labeled timeout to the client. NEVER fully pop pending — the id
+        must stay correlated (even if its payload is gone) so a late real response is
+        still recognized and dropped by handle_child_line, which returns on `was_timed_out`
+        before ever reading the tombstone's fields. NEVER hold _pending_lock across
+        _write_client (which takes _out_lock): the lock is released before the write.
+
+        Council round-2 item 2: without this reap, a permanently-hung call (upstream truly
+        never responds — the watchdog's target case) leaked pending[id] and _timers[id]
+        for the rest of the session; only a response arriving (_take) ever cleared them,
+        and a genuine hang has none. Bounded per-hang, but accumulates over a long session.
+
+        Council round-2 item 1 (id-uniqueness boundary): this tombstone is also the exact
+        state a same-id reuse clobbers in _remember (see the comment there) — the two
+        items share one root, an in-flight id assumed unique. See docs/design.md and
+        test_execute_watchdog_id_reuse_after_fire_late_response_not_dropped."""
         with self._pending_lock:
             if req_id not in self.pending:
                 return  # the real response already arrived and _take ran; nothing to synth
             self.timed_out.add(req_id)
+            self._timers.pop(req_id, None)  # already fired; nothing left to cancel
+            self.pending[req_id] = {"method": "tools/call", "tool": None, "args": None}
         self._write_client(
             tool_error_result(req_id, _watchdog_note(self._execute_timeout_s)))
 

@@ -42,6 +42,17 @@ Rejected: MCP-layer retry-dedup journal (the MCP client never re-sends `tools/ca
 model's own deliberate retries must not be suppressed, and upstream's re-send is invisible
 at this layer). Rejected: timeout config as a G21/G22 fix (no stdio knobs upstream).
 
+**Watchdog id-uniqueness boundary** (documented, not fixed): the F52 watchdog's
+exactly-once + late-drop guarantee is keyed purely on the client's JSON-RPC request id, so
+it assumes ids stay unique while in flight — true for every compliant MCP client, Claude
+Code included. A client that reuses an id already armed/fired collapses the two calls into
+one id-space: the reused id's own bookkeeping overwrites the original call's, so that
+call's late real response (if it ever arrives) is no longer recognizable as stale and
+passes through instead of being dropped. Not evidenced to matter in practice — F52's own
+retry path (resending the suggested `codedom` snippet) is a new `tools/call` with a new
+id, never a reused one. Pinned by
+`test_execute_watchdog_id_reuse_after_fire_late_response_not_dropped`.
+
 ## Allowlist (transcript census, strict-call counts)
 
 Expose: `execute_code`, `read_console`, `refresh_unity`, `set_active_instance`,

@@ -212,6 +212,93 @@ def test_execute_watchdog_id_reuse_does_not_orphan_timer():
         child.terminate()
 
 
+def test_execute_watchdog_reaps_pending_and_timer_after_fire():
+    # Council round-2 item 2: the watchdog's target case is "upstream never returns" —
+    # a permanent hang. Before the fix, a fired watchdog left pending[id]'s transformed
+    # code/args and the now-dead (already-fired) Timer object alive forever; only a real
+    # response arriving (_take) ever cleared them, and a genuine hang produces none. Assert
+    # both are reaped down to a tombstone right after the fire — BEFORE any release, so
+    # this is exercising the true no-response-ever case, not the release path below.
+    proxy, child, sink = _proxy({"execute_code_watchdog": True}, execute_timeout_s=0.3)
+    try:
+        big_code = "x" * 500  # stand-in for a real, possibly-large transformed snippet
+        proxy.handle_client_line(json.dumps(
+            {"jsonrpc": "2.0", "id": 60, "method": "tools/call",
+             "params": {"name": "execute_code",
+                        "arguments": {"action": "execute", "code": big_code, "hold": True}}}))
+        sink.wait_for_id(60)  # the synth timeout has fired
+
+        assert 60 not in proxy._timers, "the fired (dead) Timer object was not reaped"
+        pending_entry = proxy.pending.get(60)
+        assert pending_entry is None or pending_entry.get("args") is None, (
+            "the leaked transformed code/args were not reaped from pending")
+
+        # The pre-existing late-drop guarantee must still hold after the reap: releasing
+        # call 1's original real response now must NOT reach the client.
+        proxy.handle_client_line(json.dumps(
+            {"jsonrpc": "2.0", "id": 61, "method": "tools/call",
+             "params": {"name": "__release__", "arguments": {}}}))
+        sink.wait_for_id(61)
+        assert len(_ids_in_sink(sink, 60)) == 1  # only the synth; the late real response dropped
+    finally:
+        child.terminate()
+
+
+def test_execute_watchdog_id_reuse_after_fire_late_response_not_dropped():
+    # Council round-2 item 1 (documented boundary, NOT a bug to fix — see docs/design.md
+    # "Watchdog id-uniqueness boundary"): the watchdog's exactly-once + late-drop guarantee
+    # assumes the CLIENT mints unique in-flight ids, true of every compliant MCP client
+    # (Claude Code included). The realistic F52 trigger — the model retrying the suggested
+    # codedom snippet — is unaffected: a retry is a new tools/call with a new id, never a
+    # reused one. This test exists only to pin the CURRENT behavior for the non-compliant
+    # case (an id reused AFTER the watchdog already fired for it), not to fix it.
+    #
+    # Sequence: id=50 call 1 is armed + held (its real response never auto-arrives). The
+    # watchdog fires and synthesizes a timeout for id=50. id=50 is then reused — AFTER the
+    # fire, unlike test_execute_watchdog_id_reuse_does_not_orphan_timer's before-fire case
+    # — for a second, unrelated call, which resolves normally. Only then is call 1's
+    # original real response (still parked in the fake upstream's withheld queue) released.
+    # Because the reused id's own _take already consumed and cleared id=50's bookkeeping,
+    # the proxy has nothing left to recognize call 1's late response by, so it falls
+    # through the unknown-id passthrough branch — a THIRD message lands for id=50.
+    proxy, child, sink = _proxy({"execute_code_watchdog": True}, execute_timeout_s=0.3)
+    try:
+        proxy.handle_client_line(json.dumps(
+            {"jsonrpc": "2.0", "id": 50, "method": "tools/call",
+             "params": {"name": "execute_code",
+                        "arguments": {"action": "execute", "code": "first", "hold": True}}}))
+        synth = sink.wait_for_id(50)
+        assert synth["result"]["isError"] is True  # the watchdog fired
+
+        # Reuse id=50 for an unrelated, fast (non-held) call AFTER the fire.
+        proxy.handle_client_line(json.dumps(
+            {"jsonrpc": "2.0", "id": 50, "method": "tools/call",
+             "params": {"name": "execute_code",
+                        "arguments": {"action": "execute", "code": "second"}}}))
+        deadline = time.time() + 5
+        while time.time() < deadline and len(_ids_in_sink(sink, 50)) < 2:
+            time.sleep(0.02)
+        msgs = _ids_in_sink(sink, 50)
+        assert len(msgs) == 2, "call 2's genuine response never landed"
+        assert msgs[1]["result"]["isError"] is False  # call 2's own real result
+
+        # Release call 1's originally-withheld response.
+        proxy.handle_client_line(json.dumps(
+            {"jsonrpc": "2.0", "id": 51, "method": "tools/call",
+             "params": {"name": "__release__", "arguments": {}}}))
+        sink.wait_for_id(51)
+
+        # Documented boundary, not a regression: call 1's late response is NOT dropped —
+        # the client sees a THIRD message for id=50.
+        msgs = _ids_in_sink(sink, 50)
+        assert len(msgs) == 3, (
+            "boundary behavior changed: call 1's late response was dropped after all — "
+            "update docs/design.md's id-uniqueness note if this was fixed deliberately")
+        assert json.loads(msgs[2]["result"]["content"][0]["text"])["real"] is True
+    finally:
+        child.terminate()
+
+
 def test_execute_watchdog_ignores_non_execute_action():
     # A non-execute action (get_history) must NOT arm the watchdog: withheld past the
     # threshold, no synth appears; released, the real response forwards cleanly.
