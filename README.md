@@ -1,5 +1,7 @@
 # vrc-mcp-proxy
 
+> Developed in the [Atelier](https://github.com/Ryan6-VRC/atelier) workspace.
+
 An owned stdio MCP interception proxy that wraps the pinned
 [MCP-for-Unity](https://pypi.org/project/mcpforunityserver/) server
 (`mcpforunityserver==10.1.0`, via `uvx`) and corrects a handful of ways its transport
