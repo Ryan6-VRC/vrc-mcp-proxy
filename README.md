@@ -2,20 +2,9 @@
 
 > Developed in the [Atelier](https://github.com/Ryan6-VRC/atelier) workspace.
 
-An owned stdio MCP interception proxy that wraps the pinned
-[MCP-for-Unity](https://pypi.org/project/mcpforunityserver/) server
-(`mcpforunityserver==10.1.0`, via `uvx`) and corrects a handful of ways its transport
-**lies to the model** — a "success:false" that actually moved the file on disk, a snippet
-silently executed twice by a connection-level retry, a benign importer line mis-tagged as
-an error, a timeout that doesn't mean the work didn't run. It also narrows the exposed tool
-surface to an allowlist and refuses `execute_code` snippets that can't compile in a method
-body.
+An owned stdio MCP interception proxy that wraps the pinned [MCP-for-Unity](https://pypi.org/project/mcpforunityserver/) server (`mcpforunityserver==10.1.0`, via `uvx`) and corrects a handful of ways its transport **lies to the model** — a "success:false" that actually moved the file on disk, a snippet silently executed twice by a connection-level retry, a benign importer line mis-tagged as an error, a timeout that doesn't mean the work didn't run. It also narrows the exposed tool surface to an allowlist and refuses `execute_code` snippets that can't compile in a method body.
 
-It is a **thin line-based JSON-RPC relay**, not an MCP-SDK re-serve: it spawns the pinned
-server as a subprocess and passes every message through untouched except at named
-interception points. See [`docs/design.md`](docs/design.md) for the full rationale and the
-per-failure verdicts, and [`docs/bump-runbook.md`](docs/bump-runbook.md) for moving the
-upstream pin.
+It is a **thin line-based JSON-RPC relay**, not an MCP-SDK re-serve: it spawns the pinned server as a subprocess and passes every message through untouched except at named interception points. See [`docs/design.md`](docs/design.md) for the full rationale and the per-failure verdicts, and [`docs/bump-runbook.md`](docs/bump-runbook.md) for moving the upstream pin.
 
 ## Behaviors
 
@@ -34,8 +23,7 @@ upstream pin.
 
 ## Wiring it into `.mcp.json`
 
-Keep the server key `UnityMCP` so every `mcp__UnityMCP__*` name and settings matcher
-survives unchanged:
+Keep the server key `UnityMCP` so every `mcp__UnityMCP__*` name and settings matcher survives unchanged:
 
 ```json
 {
@@ -48,13 +36,11 @@ survives unchanged:
 }
 ```
 
-The proxy spawns the pinned upstream server itself; you do not point `.mcp.json` at
-`uvx mcpforunityserver` anymore.
+The proxy spawns the pinned upstream server itself; you do not point `.mcp.json` at `uvx mcpforunityserver` anymore.
 
 ## Disabling a behavior
 
-Each behavior is independently disableable at launch via one env var (comma- or
-space-separated names from the table above):
+Each behavior is independently disableable at launch via one env var (comma- or space-separated names from the table above):
 
 ```json
 "env": { "VRC_MCP_PROXY_DISABLE": "read_console_strip,canary" }
@@ -66,6 +52,4 @@ space-separated names from the table above):
 uv run pytest
 ```
 
-Tests need no Unity: transforms are unit-tested as pure functions, and one end-to-end test
-relays the proxy against a scripted fake child process. The pin lives in exactly one place —
-`src/vrc_mcp_proxy/config.py`.
+Tests need no Unity: transforms are unit-tested as pure functions, and one end-to-end test relays the proxy against a scripted fake child process. The pin lives in exactly one place — `src/vrc_mcp_proxy/config.py`.
