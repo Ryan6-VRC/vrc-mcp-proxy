@@ -2,7 +2,7 @@
 
 > Developed in the [Atelier](https://github.com/Ryan6-VRC/atelier) workspace.
 
-An owned stdio MCP interception proxy that wraps the pinned [MCP-for-Unity](https://pypi.org/project/mcpforunityserver/) server (`mcpforunityserver==10.1.0`, via `uvx`) and corrects a handful of ways its transport **lies to the model** — a "success:false" that actually moved the file on disk, a snippet silently executed twice by a connection-level retry, a benign importer line mis-tagged as an error, a timeout that doesn't mean the work didn't run. It also narrows the exposed tool surface to an allowlist and refuses `execute_code` snippets that can't compile in a method body.
+An owned stdio MCP interception proxy that wraps the pinned [MCP-for-Unity](https://pypi.org/project/mcpforunityserver/) server (version pinned in `src/vrc_mcp_proxy/config.py`, via `uvx`) and corrects a handful of ways its transport **lies to the model** — a "success:false" that actually moved the file on disk, a snippet silently executed twice by a connection-level retry, a benign importer line mis-tagged as an error, a timeout that doesn't mean the work didn't run. It also narrows the exposed tool surface to an allowlist and refuses `execute_code` snippets that can't compile in a method body.
 
 It is a **thin line-based JSON-RPC relay**, not an MCP-SDK re-serve: it spawns the pinned server as a subprocess and passes every message through untouched except at named interception points. See [`docs/design.md`](docs/design.md) for the full rationale and the per-failure verdicts, and [`docs/bump-runbook.md`](docs/bump-runbook.md) for moving the upstream pin.
 
