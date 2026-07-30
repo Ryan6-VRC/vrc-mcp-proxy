@@ -55,15 +55,29 @@ def _proxy(cfg_overrides=None, execute_timeout_s=None):
     # before it can read anything — so without this the interpreter's boot is charged
     # against those windows. Measured: the child's real response in
     # test_execute_watchdog_id_reuse_does_not_orphan_timer lands ~39 ms (34-49 ms over 30
-    # runs) ahead of the watchdog it must beat, so a boot over ~120 ms flips that test, and
-    # over ~500 ms flips two more. Worse, it then fails on the WRONG assertion: the message
-    # blames an orphaned timer for what is really the second call's own, correct watchdog
-    # firing on a genuinely-late response. Round-tripping one request proves the child is
-    # up and back in its read loop, so t=0 means the same thing on a cold checkout as a warm
-    # one. The id is a string no test filters on.
-    proxy.handle_client_line(json.dumps(
-        {"jsonrpc": "2.0", "id": "_boot", "method": "initialize", "params": {}}))
-    sink.wait_for_id("_boot")
+    # runs) ahead of the watchdog it must beat. Walking an injected child-boot delay against
+    # the whole suite, 3 runs each: clean to 50 ms, intermittent at 80 ms (1 of 3),
+    # deterministic from 120 ms, and by 500 ms it takes down two sibling watchdog tests as
+    # well. The same delay injected into a single-test run never flips it at all — which is
+    # why the original report read "0/7 alone": the suite's own load is part of the trigger,
+    # so no threshold here is a property of the delay by itself. Worse than being flaky, it
+    # then fails on the WRONG assertion: the message blames an orphaned timer for what is
+    # really the second call's own, correct watchdog firing on a genuinely-late response.
+    # Round-tripping one request proves the child is up and back in its read loop, so t=0
+    # means the same thing on a cold checkout as a warm one. The id is a string no test
+    # filters on.
+    #
+    # Kill the child explicitly if the barrier itself fails: every caller's terminate() sits
+    # in a try/finally that only arms once this function RETURNS, so a raise here would
+    # orphan a fake_upstream process — and the trigger would be exactly the cold, loaded
+    # machine this barrier exists for.
+    try:
+        proxy.handle_client_line(json.dumps(
+            {"jsonrpc": "2.0", "id": "_boot", "method": "initialize", "params": {}}))
+        sink.wait_for_id("_boot")
+    except BaseException:
+        child.kill()
+        raise
     return proxy, child, sink
 
 
