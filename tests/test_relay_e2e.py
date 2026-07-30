@@ -50,6 +50,20 @@ def _proxy(cfg_overrides=None, execute_timeout_s=None):
     proxy = Proxy(cfg=cfg, child=child, client_out=sink,
                   execute_timeout_s=execute_timeout_s)
     threading.Thread(target=proxy.pump_child, daemon=True).start()
+    # Boot barrier. The watchdog tests time their assertions on a wall clock started at
+    # their first handle_client_line, and the child is a Python process that has to start
+    # before it can read anything — so without this the interpreter's boot is charged
+    # against those windows. Measured: the child's real response in
+    # test_execute_watchdog_id_reuse_does_not_orphan_timer lands ~39 ms (34-49 ms over 30
+    # runs) ahead of the watchdog it must beat, so a boot over ~120 ms flips that test, and
+    # over ~500 ms flips two more. Worse, it then fails on the WRONG assertion: the message
+    # blames an orphaned timer for what is really the second call's own, correct watchdog
+    # firing on a genuinely-late response. Round-tripping one request proves the child is
+    # up and back in its read loop, so t=0 means the same thing on a cold checkout as a warm
+    # one. The id is a string no test filters on.
+    proxy.handle_client_line(json.dumps(
+        {"jsonrpc": "2.0", "id": "_boot", "method": "initialize", "params": {}}))
+    sink.wait_for_id("_boot")
     return proxy, child, sink
 
 
