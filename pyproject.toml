@@ -23,3 +23,6 @@ dev = ["pytest>=8"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# Import the checkout being tested, not whatever `src/` an editable install recorded. Without
+# this a run from a git worktree can silently exercise the main checkout and pass green.
+pythonpath = ["src"]

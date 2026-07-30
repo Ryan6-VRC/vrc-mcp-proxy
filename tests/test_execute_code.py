@@ -86,6 +86,19 @@ def test_every_execute_snippet_is_guarded():
         assert "proxy-duplicate-suppressed" in payload["code"], code
 
 
+def test_suppression_message_names_the_outcome_per_branch():
+    # The marker alone reads as a refusal, and it fires on ordinary short mutating calls, so
+    # the one run's outcome must be explicit: a SUCCEEDED echo was read as an error and a
+    # "failed:" echo as a suppressed success while the caller's mutation had not landed.
+    code = ec.wrap_idempotent("return 1;", guid="vrcproxy:fixed")
+    assert "[proxy-duplicate-suppressed]" in code  # docs/unity.md names this token
+    assert "SUCCEEDED" in code
+    assert "FAILED" in code
+    assert 'StartsWith("failed: ")' in code  # branches on the recorded outcome
+    assert '__a10prev == "running"' in code
+    assert code.isascii(), "generated C# must not carry non-ASCII into a diagnostic"
+
+
 def test_guard_records_failure_and_rethrows_on_exception():
     # A throwing snippet must NOT erase the key. Erasing re-arms the guard: the next queued
     # copy reads "" and re-runs the body in full, so a build that mutates state and then

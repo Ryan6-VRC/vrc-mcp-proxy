@@ -50,23 +50,40 @@ def wrap_idempotent(code, guid=None):
     build that mutates state and then throws re-runs those mutations up to 6x — the exact
     failure this guard exists to stop, on the path most likely to be behind a modal. Recording
     "failed: <msg>" instead both stops the re-run AND hands the retry the real exception text
-    (`duplicate-suppressed … first run: failed: …`) rather than the useless "running" an
-    earlier version worried about. A deliberate agent re-run is unaffected: transform_request
-    mints a FRESH guid per tools/call, so retained failure state can never suppress an
-    intentional retry — only a transport re-delivery of this same wrapped payload.
+    rather than the useless "running" an earlier version worried about. A deliberate agent
+    re-run is unaffected: transform_request mints a FRESH guid per tools/call, so retained
+    failure state can never suppress an intentional retry — only a transport re-delivery of
+    this same wrapped payload.
 
     The body starts on its OWN line: `{ ' + code` would glue a leading preprocessor directive
     (`#region`, `#if UNITY_EDITOR`) onto the brace line — CS1040, "preprocessor directives must
     appear as the first non-whitespace character on a line". The host template appends the
     snippet with AppendLine, so such a snippet compiles unwrapped; gluing it would make the
     wrap non-transparent for the one shape this docstring claims it is transparent for.
+
+    The suppression message names the ONE run's outcome before anything else, in three
+    explicit branches. The `[proxy-duplicate-suppressed]` marker reads as a refusal on its
+    own, and it fires on ordinary short mutating calls, not just the long-blocking ones —
+    so a success arrives looking like an error, and a "failed: <msg>" echo arrives looking
+    like a suppressed success while the caller's mutation has in fact not landed. The marker
+    token itself stays: Atelier's `docs/unity.md` names it as the sign of a collapsed retry.
+    Each branch strips the recorded state's own prefix, so a suppressed success does not read
+    "SUCCEEDED ... completed: 7". Generated C# stays ASCII — this text is the one place a
+    client-side encoding slip would land inside a diagnostic.
     """
     guid = f"vrcproxy:{uuid.uuid4()}" if guid is None else guid
     return (
         f'var __a10k = "{guid}";\n'
         'var __a10prev = UnityEditor.SessionState.GetString(__a10k, "");\n'
-        'if (__a10prev != "") return "[proxy-duplicate-suppressed] this delivery was a '
-        'transport retry; first run: " + __a10prev;\n'
+        'if (__a10prev != "") return "[proxy-duplicate-suppressed] upstream re-delivered '
+        'this call; it ran exactly once. " + (__a10prev == "running" '
+        '? "That run has not returned, so its outcome is unknown: verify on disk before '
+        'you re-run anything." '
+        ': __a10prev.StartsWith("failed: ") '
+        '? "That run FAILED, so your work did NOT land. This is that failure, not a '
+        'suppressed success: " + __a10prev.Substring(8) '
+        ': "That run SUCCEEDED and this is its result, which is your result: " '
+        '+ (__a10prev == "completed(null)" ? "null" : __a10prev.Substring(11)));\n'
         'UnityEditor.SessionState.SetString(__a10k, "running");\n'
         'object __a10r;\n'
         'try { __a10r = ((System.Func<object>)(() => {\n' + code + '\n'

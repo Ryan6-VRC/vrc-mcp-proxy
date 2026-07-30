@@ -5,7 +5,8 @@ Everything passes through untouched except:
   * tools/list responses  -> canary-validate + allowlist-filter
   * tools/call requests    -> allowlist / canary-drift refusal, execute_code transforms,
                               instance-target tracking
-  * tools/call responses   -> manage_asset truth-correction, read_console strip, timeout note
+  * tools/call responses   -> manage_asset truth-correction, read_console strip,
+                              manage_gameobject inactive-target note, timeout note
 
 Notifications, resources, prompts, initialize: pure passthrough. Child stderr -> our
 stderr. Child dies -> we exit nonzero, loudly.
@@ -27,7 +28,13 @@ from .envelope import (
     is_request,
     tool_error_result,
 )
-from .transforms import execute_code, manage_asset, read_console, timeouts
+from .transforms import (
+    execute_code,
+    manage_asset,
+    manage_gameobject,
+    read_console,
+    timeouts,
+)
 
 # The F52 watchdog synth. Fingerprints the Roslyn background-compile hang and routes to the
 # proven recovery (codedom retry → editor restart), not "retry is safe". See docs/design.md.
@@ -270,6 +277,9 @@ class Proxy:
                 isinstance(args, dict) and args.get("action") in (None, "get"):
             msg = read_console.strip_response(
                 msg, types=args.get("types"), filter_text=args.get("filter_text"))
+        if self.cfg.get("manage_gameobject_inactive_note", True) and \
+                name == "manage_gameobject":
+            msg = manage_gameobject.annotate(msg, args)
         if self.cfg.get("timeout_notes", True):
             msg = timeouts.annotate(msg)
         return msg
