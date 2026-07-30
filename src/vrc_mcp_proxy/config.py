@@ -29,6 +29,7 @@ BEHAVIORS = (
     "execute_code_watchdog",
     "instance_guard",
     "proxy_project_root",
+    "manage_gameobject_inactive_note",
 )
 
 

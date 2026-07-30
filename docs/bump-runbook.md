@@ -1,6 +1,8 @@
 # Version-bump runbook — moving the MCP-for-Unity pin
 
-The proxy vouches for one upstream version. Two of its behaviors are keyed on things a schema canary can't see — the console-strip substring set and the timeout marker strings — so bumping the pin is a checklist, not a one-line edit. Baseline and strings move together in one commit.
+The proxy vouches for one upstream version. Several of its behaviors are keyed on things a schema canary can't see — the console-strip substring set, the timeout marker strings, the `manage_gameobject` lookup-miss marker — so bumping the pin is a checklist, not a one-line edit. Baseline and strings move together in one commit.
+
+One of those strings is **not** the pinned server's: `transforms/manage_gameobject.py`'s marker, and the active-only lookup behavior its note describes, both come from the Unity-side C# bridge package, which moves on its own release cadence. Re-check that one when the bridge moves, not only when the pin does.
 
 ## Why the canary alone isn't enough
 
@@ -34,5 +36,9 @@ The proxy vouches for one upstream version. Two of its behaviors are keyed on th
      `read_console.py::_locate_entries` assumptions (default/plain format: payload.data is a
      list of plain strings with rich-text markup; detailed/json: dict entries with
      message/stackTrace keys); adjust if the envelope changed.
+   - `manage_gameobject.LOOKUP_MISS_MARKER` — re-read the bridge's `Editor/Tools/GameObjects/`
+     handlers: confirm the lookup-miss text still matches, and that the note's claim still
+     holds (which actions pass `searchInactive`, and that `by_id` is still matched against
+     the active-only pool). If the bridge starts opting in everywhere, retire the behavior.
 
 6. **Commit baseline + strings together.** One commit carrying the new baseline JSON, the `config.py` pin, and any `BENIGN_PATTERNS` / `TIMEOUT_MARKERS` / allowlist edits — so the pin and everything keyed to that version never drift apart in history.
