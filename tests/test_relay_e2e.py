@@ -67,16 +67,22 @@ def _proxy(cfg_overrides=None, execute_timeout_s=None):
     # means the same thing on a cold checkout as a warm one. The id is a string no test
     # filters on.
     #
-    # Kill the child explicitly if the barrier itself fails: every caller's terminate() sits
+    # Kill AND reap the child if the barrier itself fails: every caller's terminate() sits
     # in a try/finally that only arms once this function RETURNS, so a raise here would
     # orphan a fake_upstream process — and the trigger would be exactly the cold, loaded
-    # machine this barrier exists for.
+    # machine this barrier exists for. kill() alone only signals; without the wait() the
+    # process stays a zombie holding its pipe fds until pytest itself exits, so a run that
+    # trips the barrier repeatedly accumulates them.
     try:
         proxy.handle_client_line(json.dumps(
             {"jsonrpc": "2.0", "id": "_boot", "method": "initialize", "params": {}}))
         sink.wait_for_id("_boot")
     except BaseException:
         child.kill()
+        try:
+            child.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            pass
         raise
     return proxy, child, sink
 
