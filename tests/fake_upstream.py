@@ -39,6 +39,9 @@ def main():
             respond({"jsonrpc": "2.0", "id": rid, "result": {"tools": [
                 {"name": "execute_code", "inputSchema": {"type": "object"}},
                 {"name": "generate_image", "inputSchema": {"type": "object"}},
+                # Upstream still advertises read_console; the proxy denies it (F12). Listed here
+                # so the filter test asserts a real removal rather than a vacuous absence.
+                {"name": "read_console", "inputSchema": {"type": "object"}},
             ]}})
         elif method == "tools/call":
             params = msg.get("params") or {}

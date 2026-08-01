@@ -2,7 +2,9 @@
 
 > Developed in the [Atelier](https://github.com/Ryan6-VRC/atelier) workspace.
 
-An owned stdio MCP interception proxy that wraps the pinned [MCP-for-Unity](https://pypi.org/project/mcpforunityserver/) server (version pinned in `src/vrc_mcp_proxy/config.py`, via `uvx`) and corrects a handful of ways its transport **lies to the model** — a "success:false" that actually moved the file on disk, a snippet silently executed twice by a connection-level retry, a benign importer line mis-tagged as an error, a timeout that doesn't mean the work didn't run. It also narrows the exposed tool surface to an allowlist and refuses `execute_code` snippets that can't compile in a method body.
+An owned stdio MCP interception proxy that wraps the pinned [MCP-for-Unity](https://pypi.org/project/mcpforunityserver/) server (version pinned in `src/vrc_mcp_proxy/config.py`, via `uvx`) and corrects a handful of ways its transport **lies to the model** — a "success:false" that actually moved the file on disk, a snippet silently executed twice by a connection-level retry, a timeout that doesn't mean the work didn't run. It also narrows the exposed tool surface to an allowlist and refuses `execute_code` snippets that can't compile in a method body.
+
+One tool is refused rather than corrected. `read_console` truncates every console entry to its first line inside Unity, so a multi-line diagnostic's payload never reaches this process and no transform here can restore it; the refusal routes to `ReportConsole` (`com.ryan6vrc.agent-tools`), which reads `UnityEditor.LogEntries` directly. A lie the proxy cannot see is a lie it must not appear to have handled.
 
 It is a **thin line-based JSON-RPC relay**, not an MCP-SDK re-serve: it spawns the pinned server as a subprocess and passes every message through untouched except at named interception points. See [`docs/design.md`](docs/design.md) for the full rationale and the per-failure verdicts, and [`docs/bump-runbook.md`](docs/bump-runbook.md) for moving the upstream pin.
 
@@ -15,7 +17,6 @@ It is a **thin line-based JSON-RPC relay**, not an MCP-SDK re-serve: it spawns t
 | `execute_code_using_refusal` | tools/call req | Refuses snippets with top-level `using` directives (they can't live in a method body). |
 | `execute_code_idempotency_guard` | tools/call req | Wraps snippets in a SessionState guard so an upstream transport re-send returns the cached result instead of running twice. |
 | `manage_asset_truth_correction` | tools/call resp | On a move/rename/delete reported as failed, verifies on disk and rewrites a false failure to success (delete: only when the asset and its `.meta` are both gone — inferred from absence, not observed). |
-| `read_console_strip` | tools/call resp | Enforces the client's `types`/`filter_text` (upstream no-ops them) before dropping known-benign console noise, and appends a trailer naming what either step removed (never silent). A `filter_text` match is exempt from the benign-strip, so filtering *for* noise (e.g. `"MACS"`) isn't self-defeating. |
 | `manage_gameobject_inactive_note` | tools/call resp | On a `manage_gameobject` target-lookup miss, appends the note that the bridge's lookup is active-only for every action but `modify` + `set_active:true` — instanceId included — and names the two routes that do reach an inactive target. Diagnostic only: the tool has no `include_inactive` argument to inject. |
 | `timeout_notes` | tools/call resp | Appends a note to timeout errors: the work may have run; verify on disk before retrying. |
 | `execute_code_watchdog` | tools/call req + timer | Per-call timer on an `execute_code` `action:"execute"` (default 120s, `VRC_MCP_PROXY_EXECUTE_TIMEOUT_S`). On expiry synthesizes a labeled timeout routing to `compiler:"codedom"` (→ editor restart if C#7+/mutating) and drops the late real response. Bounds the Roslyn background-compile hang; does not replace `timeout_notes` (the ~36s main-thread-block bounce). |
@@ -44,7 +45,7 @@ The proxy spawns the pinned upstream server itself; you do not point `.mcp.json`
 Each behavior is independently disableable at launch via one env var (comma- or space-separated names from the table above):
 
 ```json
-"env": { "VRC_MCP_PROXY_DISABLE": "read_console_strip,canary" }
+"env": { "VRC_MCP_PROXY_DISABLE": "manage_asset_truth_correction,canary" }
 ```
 
 ## Development

@@ -117,41 +117,37 @@ def test_hidden_tool_call_refused_without_forwarding():
         child.terminate()
 
 
-def test_read_console_strip_fires_without_action_key():
-    # The schema defaults action to null, so the common call omits it. The strip gate must
-    # treat omitted action as "get" — a bug here silently bypasses the dominant call shape,
-    # invisible to the unit tests that call the strip functions directly.
-    proxy, child, sink = _proxy({"read_console_strip": True})
+def test_read_console_is_refused_with_a_usable_redirect():
+    # F12. read_console is denied, not transformed: it truncates every entry to its first line
+    # inside Unity, so the payload never reaches the proxy and there is nothing here to repair.
+    # The refusal must therefore carry the replacement door — a bare "not allowed" would leave a
+    # caller with no way to read the console at all, which is worse than the truncation.
+    # The upstream child must never see the call (denial is call-time, not response-time).
+    proxy, child, sink = _proxy({"allowlist": True})
     try:
         proxy.handle_client_line(json.dumps(
             {"jsonrpc": "2.0", "id": 4, "method": "tools/call",
-             "params": {"name": "read_console", "arguments": {}}}))  # no action key
+             "params": {"name": "read_console", "arguments": {}}}))
         resp = sink.wait_for_id(4)
-        payload = json.loads(resp["result"]["content"][0]["text"])
-        data = payload["data"]
-        assert "a real error" in data
-        assert not any("[MACS]" in x for x in data)
-        assert any("vrc-mcp-proxy" in x for x in data)  # strip trailer proves it fired
+        assert resp["result"]["isError"] is True
+        text = resp["result"]["content"][0]["text"]
+        assert "FIRST LINE" in text                 # says what is wrong
+        assert "ReportConsole.Report" in text       # names the door to use instead
+        assert "LogEntries.Clear()" in text         # and the lost `clear` action's replacement
     finally:
         child.terminate()
 
 
-def test_read_console_filter_text_arg_reaches_strip_response():
-    # AC4: proxy._handle_call_response must thread args["filter_text"] through to
-    # strip_response. Upstream's own filter_text is a no-op (fake_upstream returns the
-    # same two lines regardless), so this proves the PROXY enforced it: with
-    # filter_text="MACS", the benign MACS line must survive (client-filter exemption,
-    # F44) while the non-matching real-error line is dropped by the client filter.
-    proxy, child, sink = _proxy({"read_console_strip": True})
+def test_read_console_is_absent_from_tools_list():
+    # The denial must also remove it from tools/list — a tool advertised and then refused is a
+    # false steer, and the point is that a caller never reaches for the truncating door at all.
+    proxy, child, sink = _proxy({"allowlist": True})
     try:
         proxy.handle_client_line(json.dumps(
-            {"jsonrpc": "2.0", "id": 5, "method": "tools/call",
-             "params": {"name": "read_console",
-                        "arguments": {"filter_text": "MACS"}}}))
+            {"jsonrpc": "2.0", "id": 5, "method": "tools/list", "params": {}}))
         resp = sink.wait_for_id(5)
-        data = json.loads(resp["result"]["content"][0]["text"])["data"]
-        assert "[MACS] Applying patches" in data
-        assert "a real error" not in data
+        names = [t["name"] for t in resp["result"]["tools"]]
+        assert "read_console" not in names
     finally:
         child.terminate()
 
