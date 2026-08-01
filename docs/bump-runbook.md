@@ -1,13 +1,13 @@
 # Version-bump runbook — moving the MCP-for-Unity pin
 
-The proxy vouches for one upstream version. Several of its behaviors are keyed on things a schema canary can't see — the console-strip substring set, the timeout marker strings, the `manage_gameobject` lookup-miss marker — so bumping the pin is a checklist, not a one-line edit. Baseline and strings move together in one commit.
+The proxy vouches for one upstream version. Several of its behaviors are keyed on things a schema canary can't see — the timeout marker strings, the `manage_gameobject` lookup-miss marker — so bumping the pin is a checklist, not a one-line edit. Baseline and strings move together in one commit.
 
 One of those strings is **not** the pinned server's: `transforms/manage_gameobject.py`'s marker, and the active-only lookup behavior its note describes, both come from the Unity-side C# bridge package, which moves on its own release cadence. Re-check that one when the bridge moves, not only when the pin does.
 
 ## Why the canary alone isn't enough
 
 - The **canary** compares upstream `inputSchema`s against the committed baseline. It catches a renamed tool, a changed enum, a new/removed argument. It is blind to anything that lives in *response strings*.
-- **Console-strip** (`transforms/read_console.py::BENIGN_PATTERNS`) and **timeout notes** (`transforms/timeouts.py::TIMEOUT_MARKERS`) match upstream/Unity/VRCFury *output strings*. A refactor upstream can change those with no schema change. Re-validate them by reading source, not by trusting a green canary.
+- **Timeout notes** (`transforms/timeouts.py::TIMEOUT_MARKERS`) match upstream *output strings*. A refactor upstream can change those with no schema change. Re-validate them by reading source, not by trusting a green canary.
 
 ## Checklist
 
@@ -30,15 +30,15 @@ One of those strings is **not** the pinned server's: `transforms/manage_gameobje
 5. **Re-validate the string-keyed transforms against upstream source.**
    - `TIMEOUT_MARKERS` — grep the upstream Python `send_command`/transport for the timeout
      message strings; update if reworded.
-   - `BENIGN_PATTERNS` — re-check each predicate (any `[MACS]` line, DestroyBlendTreeRecursive,
-     FBX inconsistent-result, VRCFury `VF.Exceptions` progress mis-tag) against current Unity
-     / VRCFury output. Confirm read_console's get-response shape still matches
-     `read_console.py::_locate_entries` assumptions (default/plain format: payload.data is a
-     list of plain strings with rich-text markup; detailed/json: dict entries with
-     message/stackTrace keys); adjust if the envelope changed.
+   - The benign-console-noise predicates are **not here** — they moved to
+     `ReportConsole.BenignLabel` (`com.ryan6vrc.agent-tools`) when `read_console` was denied.
+     Re-validate them in that repo, on the bridge's cadence rather than this pin's.
+   - Check whether upstream's `read_console` has stopped truncating entries to their first line.
+     If it ever does, the denial in `allowlist.py::_REDIRECTS` is the thing to reconsider — until
+     then a bump changes nothing about it.
    - `manage_gameobject.LOOKUP_MISS_MARKER` — re-read the bridge's `Editor/Tools/GameObjects/`
      handlers: confirm the lookup-miss text still matches, and that the note's claim still
      holds (which actions pass `searchInactive`, and that `by_id` is still matched against
      the active-only pool). If the bridge starts opting in everywhere, retire the behavior.
 
-6. **Commit baseline + strings together.** One commit carrying the new baseline JSON, the `config.py` pin, and any `BENIGN_PATTERNS` / `TIMEOUT_MARKERS` / allowlist edits — so the pin and everything keyed to that version never drift apart in history.
+6. **Commit baseline + strings together.** One commit carrying the new baseline JSON, the `config.py` pin, and any `TIMEOUT_MARKERS` / allowlist edits — so the pin and everything keyed to that version never drift apart in history.

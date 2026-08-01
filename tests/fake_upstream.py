@@ -39,6 +39,9 @@ def main():
             respond({"jsonrpc": "2.0", "id": rid, "result": {"tools": [
                 {"name": "execute_code", "inputSchema": {"type": "object"}},
                 {"name": "generate_image", "inputSchema": {"type": "object"}},
+                # Upstream still advertises read_console; the proxy denies it (F12). Listed here
+                # so the filter test asserts a real removal rather than a vacuous absence.
+                {"name": "read_console", "inputSchema": {"type": "object"}},
             ]}})
         elif method == "tools/call":
             params = msg.get("params") or {}
@@ -63,13 +66,6 @@ def main():
                 t = threading.Timer(float(args["delay_s"]), respond, args=(resp,))
                 t.daemon = True
                 t.start()
-                continue
-            if name == "read_console":
-                # A strippable console payload (one benign MACS line + one real line) so
-                # the relay's strip gate can be exercised end-to-end.
-                respond({"jsonrpc": "2.0", "id": rid, "result": {"content": [
-                    {"type": "text", "text": json.dumps({"success": True, "data": [
-                        "[MACS] Applying patches", "a real error"]})}], "isError": False}})
                 continue
             # Echo the received arguments back verbatim (in addition to the existing
             # tool/ok fields other tests already assert on) so a caller can prove what

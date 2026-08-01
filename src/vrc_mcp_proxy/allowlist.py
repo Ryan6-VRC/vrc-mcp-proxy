@@ -9,7 +9,6 @@ from .envelope import tool_error_result
 # Exposed tools (transcript census — see docs/design.md §Allowlist). One line to edit.
 ALLOWLIST = frozenset({
     "execute_code",
-    "read_console",
     "refresh_unity",
     "set_active_instance",
     "manage_scene",
@@ -24,8 +23,42 @@ ALLOWLIST = frozenset({
     "debug_request_context",
 })
 
-# Tools whose refusal carries a specific redirect instead of the generic message.
-_VENUE_DENIED = frozenset({"run_tests", "get_test_job"})
+def _test_venue_denied(name):
+    """Refusal for a tool whose work belongs in the headless test venue. Named for that venue, not
+    generic: the text is only true for the test tools, so a future caller cannot reach for it to
+    deny something unrelated and emit a confidently wrong reason."""
+    return (
+        f"'{name}' is not exposed by this proxy: EditMode tests run via the headless "
+        "runner (tools/run-editmode-tests.ps1 in vrc-unity-tools), not through MCP — "
+        "wrong venue here."
+    )
+
+
+# Tools whose refusal carries a specific redirect instead of the generic message. A tool lands here
+# rather than merely being absent when there is a RIGHT way to do the thing it names: the refusal is
+# the only moment the caller is guaranteed to be listening, so it spends that moment on the door to
+# use instead. Keyed by tool name; the value is the whole refusal text.
+_REDIRECTS = {
+    "run_tests": _test_venue_denied("run_tests"),
+    "get_test_job": _test_venue_denied("get_test_job"),
+    # F12. Upstream's read_console returns only the FIRST LINE of every entry — it reads the whole
+    # message out of Unity, then discards lines 2..N. A warning whose payload is a list arrives as
+    # its header with the list gone, which is silent, total, and indistinguishable from a clean
+    # build. It is denied rather than transformed because the body never reaches the proxy: there
+    # is nothing here to un-truncate.
+    "read_console": (
+        "'read_console' is not exposed by this proxy: it returns only the FIRST LINE of each "
+        "console entry, so any multi-line diagnostic (a VRCFury warning naming each offending "
+        "path, an NDMF or optimizer report) silently loses its payload. Use the owned door "
+        "instead, which reads UnityEditor.LogEntries directly and returns every line:\n"
+        "  execute_code: return Ryan6Vrc.AgentTools.Editor.ReportConsole.Report("
+        "types: \"error,warning\", filterText: null, count: 20);\n"
+        "Contract: atelier docs/unity-tools.md §Inspection & reporting.\n"
+        "To CLEAR the console: UnityEditor.LogEntries is internal, so it has to be reached by "
+        "reflection — execute_code: typeof(UnityEditor.Editor).Assembly"
+        ".GetType(\"UnityEditor.LogEntries\").GetMethod(\"Clear\").Invoke(null, null);"
+    ),
+}
 
 
 def is_allowed(name):
@@ -44,12 +77,9 @@ def filter_tools_list(result):
 
 
 def refusal_text(name):
-    if name in _VENUE_DENIED:
-        return (
-            f"'{name}' is not exposed by this proxy: EditMode tests run via the headless "
-            "runner (tools/run-editmode-tests.ps1 in vrc-unity-tools), not through MCP — "
-            "wrong venue here."
-        )
+    redirect = _REDIRECTS.get(name)
+    if redirect is not None:
+        return redirect
     return (
         f"'{name}' is not in the proxy allowlist and was refused. If it is genuinely "
         f"needed, add it to ALLOWLIST in {config.ALLOWLIST_SOURCE} (one line)."

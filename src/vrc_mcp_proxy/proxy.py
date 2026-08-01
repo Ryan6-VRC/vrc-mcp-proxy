@@ -5,8 +5,8 @@ Everything passes through untouched except:
   * tools/list responses  -> canary-validate + allowlist-filter
   * tools/call requests    -> allowlist / canary-drift refusal, execute_code transforms,
                               instance-target tracking
-  * tools/call responses   -> manage_asset truth-correction, read_console strip,
-                              manage_gameobject inactive-target note, timeout note
+  * tools/call responses   -> manage_asset truth-correction, manage_gameobject
+                              inactive-target note, timeout note
 
 Notifications, resources, prompts, initialize: pure passthrough. Child stderr -> our
 stderr. Child dies -> we exit nonzero, loudly.
@@ -32,7 +32,6 @@ from .transforms import (
     execute_code,
     manage_asset,
     manage_gameobject,
-    read_console,
     timeouts,
 )
 
@@ -271,12 +270,6 @@ class Proxy:
                 msg = manage_asset.correct_response(msg, args, info.get("active"))
             elif manage_asset.is_delete_call(args):
                 msg = manage_asset.correct_delete_response(msg, args, info.get("active"))
-        # action defaults to null in the schema, so the most common call omits it — treat
-        # omitted/None as "get" or the strip would skip the dominant call shape.
-        if self.cfg.get("read_console_strip", True) and name == "read_console" and \
-                isinstance(args, dict) and args.get("action") in (None, "get"):
-            msg = read_console.strip_response(
-                msg, types=args.get("types"), filter_text=args.get("filter_text"))
         if self.cfg.get("manage_gameobject_inactive_note", True) and \
                 name == "manage_gameobject":
             msg = manage_gameobject.annotate(msg, args)

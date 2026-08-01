@@ -8,9 +8,9 @@ def test_all_enabled_by_default():
 
 
 def test_disable_list_parsing():
-    cfg = config.load_config(env={"VRC_MCP_PROXY_DISABLE": "canary, read_console_strip"})
+    cfg = config.load_config(env={"VRC_MCP_PROXY_DISABLE": "canary, timeout_notes"})
     assert cfg["canary"] is False
-    assert cfg["read_console_strip"] is False
+    assert cfg["timeout_notes"] is False
     assert cfg["allowlist"] is True
 
 
