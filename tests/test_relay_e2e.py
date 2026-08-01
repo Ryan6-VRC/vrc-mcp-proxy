@@ -131,9 +131,13 @@ def test_read_console_is_refused_with_a_usable_redirect():
         resp = sink.wait_for_id(4)
         assert resp["result"]["isError"] is True
         text = resp["result"]["content"][0]["text"]
-        assert "FIRST LINE" in text                 # says what is wrong
-        assert "ReportConsole.Report" in text       # names the door to use instead
-        assert "LogEntries.Clear()" in text         # and the lost `clear` action's replacement
+        assert "FIRST LINE" in text                    # says what is wrong
+        assert "ReportConsole.Report" in text          # names the door to use instead
+        # The `clear` replacement must be the route that actually COMPILES. UnityEditor.LogEntries
+        # is internal, so a bare `UnityEditor.LogEntries.Clear()` in an execute_code snippet does
+        # not build -- the refusal has to hand over the reflection form or it strands the caller.
+        assert 'GetType("UnityEditor.LogEntries")' in text
+        assert 'GetMethod("Clear")' in text
     finally:
         child.terminate()
 

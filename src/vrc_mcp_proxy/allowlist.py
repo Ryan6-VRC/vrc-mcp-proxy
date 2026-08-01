@@ -27,17 +27,17 @@ ALLOWLIST = frozenset({
 # rather than merely being absent when there is a RIGHT way to do the thing it names: the refusal is
 # the only moment the caller is guaranteed to be listening, so it spends that moment on the door to
 # use instead. Keyed by tool name; the value is the whole refusal text.
+def _wrong_venue(name):
+    return (
+        f"'{name}' is not exposed by this proxy: EditMode tests run via the headless "
+        "runner (tools/run-editmode-tests.ps1 in vrc-unity-tools), not through MCP — "
+        "wrong venue here."
+    )
+
+
 _REDIRECTS = {
-    "run_tests": (
-        "'run_tests' is not exposed by this proxy: EditMode tests run via the headless "
-        "runner (tools/run-editmode-tests.ps1 in vrc-unity-tools), not through MCP — "
-        "wrong venue here."
-    ),
-    "get_test_job": (
-        "'get_test_job' is not exposed by this proxy: EditMode tests run via the headless "
-        "runner (tools/run-editmode-tests.ps1 in vrc-unity-tools), not through MCP — "
-        "wrong venue here."
-    ),
+    "run_tests": _wrong_venue("run_tests"),
+    "get_test_job": _wrong_venue("get_test_job"),
     # F12. Upstream's read_console returns only the FIRST LINE of every entry — it reads the whole
     # message out of Unity, then discards lines 2..N. A warning whose payload is a list arrives as
     # its header with the list gone, which is silent, total, and indistinguishable from a clean
@@ -50,8 +50,10 @@ _REDIRECTS = {
         "instead, which reads UnityEditor.LogEntries directly and returns every line:\n"
         "  execute_code: return Ryan6Vrc.AgentTools.Editor.ReportConsole.Report("
         "types: \"error,warning\", filterText: null, count: 20);\n"
-        "Contract: docs/unity-tools.md §ReportConsole. To clear the console, call "
-        "UnityEditor.LogEntries.Clear() from execute_code."
+        "Contract: atelier docs/unity-tools.md §Inspection & reporting.\n"
+        "To CLEAR the console: UnityEditor.LogEntries is internal, so it has to be reached by "
+        "reflection — execute_code: typeof(UnityEditor.Editor).Assembly"
+        ".GetType(\"UnityEditor.LogEntries\").GetMethod(\"Clear\").Invoke(null, null);"
     ),
 }
 

@@ -67,13 +67,6 @@ def main():
                 t.daemon = True
                 t.start()
                 continue
-            if name == "read_console":
-                # A strippable console payload (one benign MACS line + one real line) so
-                # the relay's strip gate can be exercised end-to-end.
-                respond({"jsonrpc": "2.0", "id": rid, "result": {"content": [
-                    {"type": "text", "text": json.dumps({"success": True, "data": [
-                        "[MACS] Applying patches", "a real error"]})}], "isError": False}})
-                continue
             # Echo the received arguments back verbatim (in addition to the existing
             # tool/ok fields other tests already assert on) so a caller can prove what
             # this process actually received on its own stdin — e.g. the G63 real-stdio
