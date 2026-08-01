@@ -23,11 +23,10 @@ ALLOWLIST = frozenset({
     "debug_request_context",
 })
 
-# Tools whose refusal carries a specific redirect instead of the generic message. A tool lands here
-# rather than merely being absent when there is a RIGHT way to do the thing it names: the refusal is
-# the only moment the caller is guaranteed to be listening, so it spends that moment on the door to
-# use instead. Keyed by tool name; the value is the whole refusal text.
-def _wrong_venue(name):
+def _test_venue_denied(name):
+    """Refusal for a tool whose work belongs in the headless test venue. Named for that venue, not
+    generic: the text is only true for the test tools, so a future caller cannot reach for it to
+    deny something unrelated and emit a confidently wrong reason."""
     return (
         f"'{name}' is not exposed by this proxy: EditMode tests run via the headless "
         "runner (tools/run-editmode-tests.ps1 in vrc-unity-tools), not through MCP — "
@@ -35,9 +34,13 @@ def _wrong_venue(name):
     )
 
 
+# Tools whose refusal carries a specific redirect instead of the generic message. A tool lands here
+# rather than merely being absent when there is a RIGHT way to do the thing it names: the refusal is
+# the only moment the caller is guaranteed to be listening, so it spends that moment on the door to
+# use instead. Keyed by tool name; the value is the whole refusal text.
 _REDIRECTS = {
-    "run_tests": _wrong_venue("run_tests"),
-    "get_test_job": _wrong_venue("get_test_job"),
+    "run_tests": _test_venue_denied("run_tests"),
+    "get_test_job": _test_venue_denied("get_test_job"),
     # F12. Upstream's read_console returns only the FIRST LINE of every entry — it reads the whole
     # message out of Unity, then discards lines 2..N. A warning whose payload is a list arrives as
     # its header with the list gone, which is silent, total, and indistinguishable from a clean

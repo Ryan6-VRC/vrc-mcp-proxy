@@ -31,7 +31,7 @@ One of those strings is **not** the pinned server's: `transforms/manage_gameobje
    - `TIMEOUT_MARKERS` — grep the upstream Python `send_command`/transport for the timeout
      message strings; update if reworded.
    - The benign-console-noise predicates are **not here** — they moved to
-     `ReportConsole.BenignPatterns` (`com.ryan6vrc.agent-tools`) when `read_console` was denied.
+     `ReportConsole.BenignLabel` (`com.ryan6vrc.agent-tools`) when `read_console` was denied.
      Re-validate them in that repo, on the bridge's cadence rather than this pin's.
    - Check whether upstream's `read_console` has stopped truncating entries to their first line.
      If it ever does, the denial in `allowlist.py::_REDIRECTS` is the thing to reconsider — until
