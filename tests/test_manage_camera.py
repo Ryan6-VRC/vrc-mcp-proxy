@@ -34,3 +34,27 @@ def test_caller_arguments_are_not_mutated():
     args = {"action": "screenshot"}
     mc.transform_request(args)
     assert "output_folder" not in args
+
+
+def test_blank_output_folder_is_defaulted():
+    # Upstream resolves with IsNullOrWhiteSpace, so honoring a blank as an explicit choice
+    # would land the shot in Assets/Screenshots — the litter this exists to stop.
+    for value in ("", "   "):
+        out = mc.transform_request({"action": "screenshot", "output_folder": value})
+        assert out["output_folder"] == mc.SCRATCH_SCREENSHOTS, repr(value)
+
+
+def test_action_case_and_padding_are_normalized():
+    # manage_camera's `action` has NO enum in the pinned schema and the bridge lowercases it,
+    # so a capitalized action is schema-legal and still captures.
+    for action in ("Screenshot", " SCREENSHOT ", "Screenshot_Multiview"):
+        out = mc.transform_request({"action": action})
+        assert out["output_folder"] == mc.SCRATCH_SCREENSHOTS, action
+
+
+def test_non_string_action_does_not_raise():
+    # A set membership test on an unhashable value raises, and an exception on the request
+    # path kills the relay instead of letting upstream return its schema error.
+    for action in (["screenshot"], {"a": 1}, 7, None):
+        args = {"action": action}
+        assert mc.transform_request(args) is args

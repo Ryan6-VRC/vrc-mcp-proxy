@@ -31,6 +31,13 @@ import uuid
 # EditorApplication.Exit. Nothing reaches those by accident, a snippet that wants them has
 # reflection and a dozen other doors, and the Exit blocks measured here were all intentional
 # shutdowns. Guarding them would cost real friction to deter nobody.
+#
+# What IS given up, stated plainly: the list also holds `while(true)`, `while (true)`,
+# `for(;;)`, and `for (;;)`. That is the one class where a substring match is defensible —
+# a literal infinite loop wedges the Editor main thread, and `execute_code_watchdog` bounds
+# only the proxy's view of that hang, not the hang. It is also the class a caller is least
+# likely to write by accident and most likely to write as `while (x)`, which was never
+# covered.
 # The ledger row this behavior answers to, and the doc line it retires: docs/design.md.
 
 # Top-level using DIRECTIVE, e.g. `using System;`, `using static X.Y;`, `using A = B.C;`.
@@ -139,8 +146,9 @@ def transform_request(arguments, cfg, guid=None):
     if cfg.get("execute_code_safety_off", True):
         # Only when the caller said nothing. A caller that passed safety_checks explicitly —
         # either value — is making a deliberate claim about this snippet, and the proxy is not
-        # the place to overrule it. A present-but-null counts as nothing said: upstream would
-        # coerce it back to the default (`?.Value<bool>() ?? true`), re-arming the gate.
+        # the place to overrule it. A present-but-null counts as nothing said: the pinned
+        # schema types this boolean with no null variant, so a null is not a claim about the
+        # gate — it is a client serializing an unset field.
         if new.get("safety_checks") is None:
             new["safety_checks"] = False
     return "forward", new
