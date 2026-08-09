@@ -31,7 +31,9 @@ from .envelope import (
 from .transforms import (
     execute_code,
     manage_asset,
+    manage_camera,
     manage_gameobject,
+    manage_scene,
     timeouts,
 )
 
@@ -150,6 +152,9 @@ class Proxy:
         params = msg.get("params") or {}
         name = params.get("name")
         arguments = params.get("arguments") or {}
+        # Rebuild msg below only if a request transform actually replaced this object; every
+        # transform returns a new dict rather than mutating the client's.
+        original_arguments = arguments
 
         if self.cfg.get("allowlist", True) and not is_allowed(name):
             self._write_client(refusal_result(req_id, name))
@@ -176,6 +181,16 @@ class Proxy:
                 self._write_client(tool_error_result(req_id, payload))
                 return
             arguments = payload
+        elif name == "manage_scene" and self.cfg.get("manage_scene_arg_guard", True):
+            refusal = manage_scene.refusal_for(arguments)
+            if refusal is not None:
+                self._write_client(tool_error_result(req_id, refusal))
+                return
+        elif name == "manage_camera" and \
+                self.cfg.get("manage_camera_screenshot_output", True):
+            arguments = manage_camera.transform_request(arguments)
+
+        if arguments is not original_arguments:
             params = dict(params)
             params["arguments"] = arguments
             msg = dict(msg)

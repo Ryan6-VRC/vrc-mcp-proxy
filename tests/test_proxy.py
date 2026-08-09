@@ -289,3 +289,66 @@ def test_set_active_instance_proxy_project_root_survives_instance_guard_disabled
     [line] = p.client_out.lines
     payload = json.loads(json.loads(line)["result"]["content"][0]["text"])
     assert payload["proxy_project_root"] == "C:/proj/One"
+
+
+# --- request-side wiring for the manage_scene / manage_camera transforms ----
+def _forwarded_arguments(p):
+    return json.loads(p.child.stdin.getvalue())["params"]["arguments"]
+
+
+def test_manage_scene_misdirected_target_is_refused_at_the_relay():
+    cfg = _all_off()
+    cfg["manage_scene_arg_guard"] = True
+    p = _proxy(cfg)
+
+    p.handle_client_line(_call_request(
+        1, "manage_scene", {"action": "get_hierarchy", "target": "Chocolat"}))
+
+    assert p.child.stdin.getvalue() == ""  # never reaches the child
+    [line] = p.client_out.lines
+    msg = json.loads(line)
+    assert msg["result"]["isError"] is True
+    assert "'parent'" in msg["result"]["content"][0]["text"]
+
+
+def test_manage_scene_guard_disabled_forwards_the_ignored_argument():
+    p = _proxy(_all_off())
+    p.handle_client_line(_call_request(
+        1, "manage_scene", {"action": "get_hierarchy", "target": "Chocolat"}))
+    assert _forwarded_arguments(p)["target"] == "Chocolat"
+
+
+def test_manage_camera_screenshot_gains_the_scratch_output_folder():
+    cfg = _all_off()
+    cfg["manage_camera_screenshot_output"] = True
+    p = _proxy(cfg)
+
+    p.handle_client_line(_call_request(
+        1, "manage_camera", {"action": "screenshot", "include_image": True}))
+
+    args = _forwarded_arguments(p)
+    assert args["output_folder"] == "Assets/Agent/Scratch/Screenshots"
+    assert args["include_image"] is True  # the rest of the call is untouched
+
+
+def test_manage_camera_non_capture_action_is_forwarded_unchanged():
+    cfg = _all_off()
+    cfg["manage_camera_screenshot_output"] = True
+    p = _proxy(cfg)
+
+    p.handle_client_line(_call_request(1, "manage_camera", {"action": "list_cameras"}))
+
+    assert _forwarded_arguments(p) == {"action": "list_cameras"}
+
+
+def test_execute_code_reaches_the_child_with_safety_checks_off():
+    cfg = _all_off()
+    cfg["execute_code_safety_off"] = True
+    p = _proxy(cfg)
+
+    p.handle_client_line(_call_request(
+        1, "execute_code", {"action": "execute", "code": "return 1;"}))
+
+    args = _forwarded_arguments(p)
+    assert args["safety_checks"] is False
+    assert args["code"] == "return 1;"  # idempotency guard is off in this cfg

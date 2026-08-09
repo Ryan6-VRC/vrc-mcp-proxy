@@ -29,6 +29,9 @@ BEHAVIORS = (
     "instance_guard",
     "proxy_project_root",
     "manage_gameobject_inactive_note",
+    "execute_code_safety_off",
+    "manage_scene_arg_guard",
+    "manage_camera_screenshot_output",
 )
 
 

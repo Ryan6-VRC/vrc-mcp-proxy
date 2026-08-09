@@ -155,3 +155,47 @@ def test_disabled_guard_leaves_code():
     cfg = {"execute_code_using_refusal": True, "execute_code_idempotency_guard": False}
     action, payload = ec.transform_request({"action": "execute", "code": "return 1;"}, cfg)
     assert action == "forward" and payload["code"] == "return 1;"
+
+
+# --- safety_checks off ------------------------------------------------------
+def test_execute_snippet_is_sent_with_safety_checks_off():
+    _, payload = ec.transform_request({"action": "execute", "code": "return 1;"}, CFG)
+    assert payload["safety_checks"] is False
+
+
+def test_scratch_delete_is_no_longer_a_blocked_pattern_round_trip():
+    # The measured case: legitimate cleanup under the disposable pile, refused by a
+    # path-blind substring match on the bridge side.
+    code = ('var dst = "Assets/Agent/Scratch/RoundTrip/probe.controller";\n'
+            'if (System.IO.File.Exists(dst)) AssetDatabase.DeleteAsset(dst);\n'
+            'return "ok";')
+    _, payload = ec.transform_request({"action": "execute", "code": code}, CFG)
+    assert payload["safety_checks"] is False
+    assert "AssetDatabase.DeleteAsset" in payload["code"]  # forwarded, not rewritten
+
+
+def test_explicit_safety_checks_true_is_left_alone():
+    # A caller asking for the gate on this snippet is making a claim; the proxy doesn't
+    # overrule it.
+    _, payload = ec.transform_request(
+        {"action": "execute", "code": "return 1;", "safety_checks": True}, CFG)
+    assert payload["safety_checks"] is True
+
+
+def test_null_safety_checks_is_treated_as_unset():
+    # Upstream coerces a null back to true (`?.Value<bool>() ?? true`), re-arming the gate.
+    _, payload = ec.transform_request(
+        {"action": "execute", "code": "return 1;", "safety_checks": None}, CFG)
+    assert payload["safety_checks"] is False
+
+
+def test_safety_off_disabled_leaves_arguments_alone():
+    cfg = dict(CFG, execute_code_safety_off=False)
+    _, payload = ec.transform_request({"action": "execute", "code": "return 1;"}, cfg)
+    assert "safety_checks" not in payload
+
+
+def test_non_execute_action_is_not_given_safety_checks():
+    args = {"action": "get_history", "limit": 5}
+    _, payload = ec.transform_request(args, CFG)
+    assert "safety_checks" not in payload
