@@ -127,7 +127,106 @@ def wrap_idempotent(code, guid=None):
     )
 
 
-def transform_request(arguments, cfg, guid=None):
+VENUE_MISROUTE_MARKER = "[proxy-venue-misroute]"
+
+
+def csharp_literal(value):
+    """A C# double-quoted string literal for `value`, escaped and ASCII-only.
+
+    Two constraints meet here and only escaping satisfies both. The path is interpolated
+    into generated C#, so a `"` or `\\` in it would break the snippet (a project path can
+    hold either). And generated C# stays ASCII: CodeDom round-trips the source through a
+    temp file, and a non-ASCII path that survives the wire but mangles there yields a
+    literal differing from `Application.dataPath` by exactly the mangled characters — a
+    permanent, causeless false refusal in that project. `\\uXXXX` (`\\UXXXXXXXX` past the
+    BMP) makes the encoding question moot rather than betting on it.
+    """
+    out = []
+    for ch in value:
+        code = ord(ch)
+        if ch == '"':
+            out.append('\\"')
+        elif ch == "\\":
+            out.append("\\\\")
+        elif 0x20 <= code <= 0x7E:
+            out.append(ch)
+        elif code <= 0xFFFF:
+            out.append("\\u%04x" % code)
+        else:
+            out.append("\\U%08x" % code)
+    return '"' + "".join(out) + '"'
+
+
+def venue_guard(assets_path):
+    """C# asserting this Editor is the one the call was pinned to, or "" if unresolved.
+
+    Compares `Application.dataPath` against the pinned Editor's own `project_path` from its
+    heartbeat — the same string, written by that same Editor process from that same API, so
+    this is two reads of one value, not two spellings of a path to reconcile. The
+    separator/trim/case handling is belt-and-braces for that reason, not load-bearing.
+
+    Unresolved => "" (no guard), matching `manage_asset`'s "unverifiable, left as-is"
+    discipline. This must never guess a venue: guessing wrong refuses every call to the
+    right one.
+
+    The refusal says "nothing ran HERE", not "nothing ran". A misroute happens on a RETRY,
+    and the delivery that failed first often did execute in the pinned Editor — that is the
+    premise `wrap_idempotent` exists for. An unqualified "nothing ran" would invite a
+    re-run, and since `transform_request` mints a fresh guid per tools/call the pinned
+    Editor's guard key cannot suppress it: the mutation would land twice, the exact failure
+    the neighbouring guard exists to prevent. So the text scopes the claim to this Editor,
+    carries the verify-before-rerun discipline its siblings do (WATCHDOG_NOTE,
+    timeouts.annotate, the "running" branch above), and names both fixes.
+
+    The marker LEADS the returned string, and `misroute_text` anchors on that — which is
+    what keeps an ordinary snippet that merely returns text containing the marker (reading
+    a doc that names the token, per the ratchet) from being rewritten into a false error.
+    """
+    if not assets_path:
+        return ""
+    expected = assets_path.replace("\\", "/").rstrip("/")
+    return (
+        "var __a10venue = " + csharp_literal(expected) + ";\n"
+        "var __a10here = UnityEngine.Application.dataPath"
+        '.Replace("\\\\", "/").TrimEnd(\'/\');\n'
+        "if (string.Compare(__a10here, __a10venue, "
+        "System.StringComparison.OrdinalIgnoreCase) != 0) return\n"
+        '  "' + VENUE_MISROUTE_MARKER + ' this call was pinned to " + __a10venue\n'
+        '  + " but reached " + __a10here + "; nothing ran HERE. The pinned editor may have '
+        'run an earlier delivery of this same call, so verify on disk before re-running. '
+        'Then re-pin with set_active_instance (full Name@hash), or route this one call with '
+        'unity_instance.";\n'
+    )
+
+
+def misroute_text(payload):
+    """The venue refusal string from a parsed execute_code result payload, else None.
+
+    Anchored on the marker at the START of the returned value, and read from the parsed
+    `data.result` field rather than the raw response text. Both narrowings are load-bearing,
+    and neither is theoretical:
+
+      * The bridge's history keeps a 200-char `resultPreview` AND a 500-char `codePreview`,
+        and `get_history` echoes both (ExecuteCode.cs). The code preview quotes the snippet
+        source, which CONTAINS this marker as a literal — so a raw substring match over the
+        response text would convert an ordinary history listing into a fabricated misroute
+        error, with no refusal ever having happened. `get_history` is the same tool name, so
+        keying on the tool alone does not exclude it; the caller keys on action=="execute"
+        and the marker never leads `data.entries`.
+      * A snippet that returns file or doc text naming the token (`docs/unity.md` names it,
+        per the ratchet) would match unanchored. The guard's return is always the whole
+        value and always leads with the marker, so anchoring costs nothing.
+    """
+    if not isinstance(payload, dict):
+        return None
+    data = payload.get("data")
+    value = data.get("result") if isinstance(data, dict) else data
+    if isinstance(value, str) and value.startswith(VENUE_MISROUTE_MARKER):
+        return value
+    return None
+
+
+def transform_request(arguments, cfg, guid=None, assets_path=None):
     """Decide what to do with an execute_code tools/call.
 
     Returns ("forward", new_arguments) or ("refuse", refusal_text). Only action=="execute"
@@ -141,8 +240,16 @@ def transform_request(arguments, cfg, guid=None):
         return "refuse", USING_REFUSAL_TEXT
 
     new = dict(arguments)
+    guard = venue_guard(assets_path) if cfg.get("execute_code_venue_guard", True) else ""
     if cfg.get("execute_code_idempotency_guard", True):
-        new["code"] = wrap_idempotent(code, guid)
+        # Venue check FIRST, ahead of the SessionState write: a misrouted call then leaves
+        # no guard key in the wrong Editor, and a re-delivery re-evaluates the venue rather
+        # than reading back a poisoned "running".
+        new["code"] = guard + wrap_idempotent(code, guid)
+    elif guard:
+        # The venue guard is its own behavior and survives the idempotency guard being
+        # disabled — coupling the two is what F7 forbids.
+        new["code"] = guard + code
     if cfg.get("execute_code_safety_off", True):
         # Only when the caller said nothing. A caller that passed safety_checks explicitly —
         # either value — is making a deliberate claim about this snippet, and the proxy is not

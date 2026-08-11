@@ -1,5 +1,5 @@
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from vrc_mcp_proxy import instances
 
@@ -173,3 +173,72 @@ def test_guard_refuses_empty_string_per_call_instance():
     # defeating the guard.
     text = instances.instance_guard_refusal("", None, 2, ["One@aaaa", "Two@bbbb"])
     assert text is not None
+
+
+# --- resolve_assets_path: freshness matters here, unlike resolve_project_root ---
+def _now():
+    return datetime.now(timezone.utc)
+
+
+def _iso(dt):
+    return dt.isoformat()
+
+
+def test_assets_path_hash_selector_resolves_against_stale_heartbeat(tmp_path):
+    # hash == SHA1(Application.dataPath)[:8], so hash -> path is a total function: a stale
+    # file still names the right venue. Filtering here would drop the guard exactly when
+    # the misroute bites — during a long block that ages the heartbeat out.
+    old = _iso(datetime.now(timezone.utc) - timedelta(hours=5))
+    _write_hb(tmp_path, "aaaa1111", 6401, "C:/proj/One", "One", last_heartbeat=old)
+    assert instances.resolve_assets_path(
+        "One@aaaa1111", None, str(tmp_path), now=_now()) == "C:/proj/One/Assets"
+
+
+def test_assets_path_port_selector_ignores_stale_heartbeat(tmp_path):
+    # Ports are reused across projects and a status file outlives a crashed editor, so a
+    # stale file under a recycled port would guard against a FOREIGN venue and refuse
+    # every call to the correct one.
+    old = _iso(datetime.now(timezone.utc) - timedelta(hours=5))
+    _write_hb(tmp_path, "dead0001", 6400, "C:/proj/Crashed", "Crashed", last_heartbeat=old)
+    assert instances.resolve_assets_path(
+        "6400", None, str(tmp_path), now=_now()) is None
+
+
+def test_assets_path_port_selector_resolves_when_live(tmp_path):
+    _write_hb(tmp_path, "aaaa1111", 6400, "C:/proj/One", "One",
+              last_heartbeat=_iso(datetime.now(timezone.utc)))
+    assert instances.resolve_assets_path(
+        "6400", None, str(tmp_path), now=_now()) == "C:/proj/One/Assets"
+
+
+def test_assets_path_no_selector_counts_only_live(tmp_path):
+    # Stale files inflate the count; unfiltered, one live editor plus two abandoned status
+    # files reads as "ambiguous" and silently suppresses the guard.
+    old = _iso(datetime.now(timezone.utc) - timedelta(hours=5))
+    _write_hb(tmp_path, "aaaa1111", 6401, "C:/proj/One", "One",
+              last_heartbeat=_iso(datetime.now(timezone.utc)))
+    _write_hb(tmp_path, "dead0001", 6402, "C:/proj/Gone", "Gone", last_heartbeat=old)
+    _write_hb(tmp_path, "dead0002", 6403, "C:/proj/Gone2", "Gone2", last_heartbeat=old)
+    assert instances.resolve_assets_path(
+        None, None, str(tmp_path), now=_now()) == "C:/proj/One/Assets"
+
+
+def test_assets_path_ambiguous_prefix_is_unresolved(tmp_path):
+    _write_hb(tmp_path, "aaaa1111", 6401, "C:/proj/One", "One")
+    _write_hb(tmp_path, "aaaa2222", 6402, "C:/proj/Two", "Two")
+    assert instances.resolve_assets_path("aaaa", None, str(tmp_path), now=_now()) is None
+
+
+def test_assets_path_per_call_beats_active(tmp_path):
+    _write_hb(tmp_path, "aaaa1111", 6401, "C:/proj/One", "One")
+    _write_hb(tmp_path, "bbbb2222", 6402, "C:/proj/Two", "Two")
+    assert instances.resolve_assets_path(
+        "Two@bbbb2222", "One@aaaa1111", str(tmp_path), now=_now()) == "C:/proj/Two/Assets"
+
+
+def test_assets_path_without_clock_on_filtered_path_is_unresolved(tmp_path):
+    # No clock, no freshness check: resolve to nothing rather than silently falling back
+    # to an unfiltered read on the path where staleness is the hazard.
+    _write_hb(tmp_path, "aaaa1111", 6401, "C:/proj/One", "One",
+              last_heartbeat=_iso(datetime.now(timezone.utc)))
+    assert instances.resolve_assets_path(None, None, str(tmp_path)) is None

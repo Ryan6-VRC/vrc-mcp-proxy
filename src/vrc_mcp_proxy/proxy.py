@@ -176,7 +176,15 @@ class Proxy:
                 return
 
         if name == "execute_code":
-            action, payload = execute_code.transform_request(arguments, self.cfg)
+            # Resolve the pinned venue for the guard. Same two knobs the server routes on,
+            # read at request time so a later set_active_instance can't retarget this call.
+            venue = None
+            if self.cfg.get("execute_code_venue_guard", True):
+                venue = instances.resolve_assets_path(
+                    arguments.get("unity_instance") if isinstance(arguments, dict) else None,
+                    self.active_instance, now=datetime.now(timezone.utc))
+            action, payload = execute_code.transform_request(
+                arguments, self.cfg, assets_path=venue)
             if action == "refuse":
                 self._write_client(tool_error_result(req_id, payload))
                 return
@@ -280,6 +288,25 @@ class Proxy:
                             msg["result"]["content"][idx]["text"] = json.dumps(payload)
                     except (json.JSONDecodeError, TypeError):
                         pass
+        # A venue refusal comes back as a SUCCESS payload — the snippet returned a string, so
+        # upstream reports success:true for work that did not run. Leaving it that way would
+        # reintroduce silence at the last hop of a guard whose whole purpose is a silent
+        # wrong-venue failure, so it is rewritten to an error. This is the proxy's only
+        # content-keyed response transform: permitted because the key is a marker WE emitted
+        # two hops earlier, not upstream prose whose wording drifts between versions (which
+        # manage_asset.py's "NO string matching" rule is about). Scoped to action=="execute"
+        # and anchored inside misroute_text — see its docstring for the get_history echo that
+        # a looser match would misfire on.
+        if self.cfg.get("execute_code_venue_guard", True) and name == "execute_code" \
+                and isinstance(args, dict) and args.get("action") == "execute":
+            text, _idx = first_text_payload(msg)
+            if text is not None:
+                try:
+                    refusal = execute_code.misroute_text(json.loads(text))
+                except (json.JSONDecodeError, TypeError):
+                    refusal = None
+                if refusal is not None:
+                    return tool_error_result(msg["id"], refusal)
         if self.cfg.get("manage_asset_truth_correction", True) and name == "manage_asset":
             if manage_asset.is_move_call(args):
                 msg = manage_asset.correct_response(msg, args, info.get("active"))

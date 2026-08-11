@@ -352,3 +352,69 @@ def test_execute_code_reaches_the_child_with_safety_checks_off():
     args = _forwarded_arguments(p)
     assert args["safety_checks"] is False
     assert args["code"] == "return 1;"  # idempotency guard is off in this cfg
+
+
+# --- venue guard: the response half, only visible through the relay --------
+def _execute_request(rid, code="return 1;", action="execute"):
+    return json.dumps({"jsonrpc": "2.0", "id": rid, "method": "tools/call",
+                       "params": {"name": "execute_code",
+                                  "arguments": {"action": action, "code": code}}})
+
+
+def _result(rid, payload):
+    return json.dumps({"jsonrpc": "2.0", "id": rid,
+                       "result": {"content": [{"type": "text",
+                                               "text": json.dumps(payload)}]}})
+
+
+def _venue_proxy():
+    cfg = _all_off()
+    cfg["execute_code_venue_guard"] = True
+    return _proxy(cfg)
+
+
+def test_venue_refusal_is_rewritten_to_an_error():
+    # Upstream reports success:true for a snippet that returned a string, so a misroute
+    # would otherwise arrive in the envelope reserved for work that succeeded.
+    from vrc_mcp_proxy.transforms.execute_code import VENUE_MISROUTE_MARKER
+    p = _venue_proxy()
+    p.handle_client_line(_execute_request(1))
+    refusal = VENUE_MISROUTE_MARKER + " this call was pinned to X but reached Y; nothing ran HERE."
+    p.handle_child_line(_result(1, {"success": True, "data": {"result": refusal}}))
+    out = json.loads(p.client_out.lines[-1])
+    assert out["result"]["isError"] is True
+    assert VENUE_MISROUTE_MARKER in out["result"]["content"][0]["text"]
+
+
+def test_get_history_echoing_the_marker_is_not_rewritten():
+    # The bridge's history echoes a codePreview of the snippet SOURCE, which contains the
+    # marker as a literal. Same tool name, so only the action scoping excludes it.
+    from vrc_mcp_proxy.transforms.execute_code import VENUE_MISROUTE_MARKER
+    p = _venue_proxy()
+    p.handle_client_line(_execute_request(2, action="get_history"))
+    payload = {"success": True, "data": {"total": 1, "entries": [
+        {"codePreview": 'return "' + VENUE_MISROUTE_MARKER + ' ...";'}]}}
+    p.handle_child_line(_result(2, payload))
+    out = json.loads(p.client_out.lines[-1])
+    assert "isError" not in out["result"]
+    assert "entries" in out["result"]["content"][0]["text"]
+
+
+def test_venue_guard_disabled_leaves_the_refusal_as_success():
+    from vrc_mcp_proxy.transforms.execute_code import VENUE_MISROUTE_MARKER
+    p = _proxy(_all_off())  # venue guard off
+    p.handle_client_line(_execute_request(3))
+    p.handle_child_line(_result(3, {"success": True,
+                                    "data": {"result": VENUE_MISROUTE_MARKER + " x"}}))
+    out = json.loads(p.client_out.lines[-1])
+    assert "isError" not in out["result"]
+
+
+def test_tested_module_is_this_worktree():
+    """dispatched-work.md: an editable install records ONE absolute path, so a second
+    checkout can import the first one's src/ and pass regardless of its own changes."""
+    import pathlib
+    from vrc_mcp_proxy import instances as m
+    here = pathlib.Path(__file__).resolve().parents[1]
+    assert pathlib.Path(m.__file__).resolve().is_relative_to(here), (
+        f"imported {m.__file__}, expected under {here}")
