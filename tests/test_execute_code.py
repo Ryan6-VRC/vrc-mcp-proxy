@@ -199,3 +199,122 @@ def test_non_execute_action_is_not_given_safety_checks():
     args = {"action": "get_history", "limit": 5}
     _, payload = ec.transform_request(args, CFG)
     assert "safety_checks" not in payload
+
+
+# --- venue guard (F48 residual: the retry port-scan misroute) ---------------
+VCFG = dict(CFG, execute_code_venue_guard=True)
+
+
+def test_venue_guard_emitted_with_resolved_path():
+    _, payload = ec.transform_request(
+        {"action": "execute", "code": "return 1;"}, VCFG,
+        guid="vrcproxy:fixed", assets_path="C:/proj/One/Assets")
+    code = payload["code"]
+    assert 'var __a10venue = "C:/proj/One/Assets";' in code
+    assert ec.VENUE_MISROUTE_MARKER in code
+    # Scoped to this editor, and carries the verify-before-rerun discipline: an
+    # unqualified "nothing ran" would invite the double-landing re-run.
+    assert "nothing ran HERE" in code
+    assert "verify on disk before re-running" in code
+    # Names the fix, per the governed-diagnostics bar every sibling refusal meets.
+    assert "set_active_instance" in code and "unity_instance" in code
+
+
+def test_venue_guard_precedes_the_sessionstate_write():
+    # Ordering is load-bearing: a misrouted call must leave no guard key behind in the
+    # wrong editor, so a re-delivery re-evaluates the venue instead of reading "running".
+    _, payload = ec.transform_request(
+        {"action": "execute", "code": "return 1;"}, VCFG,
+        guid="vrcproxy:fixed", assets_path="C:/proj/One/Assets")
+    code = payload["code"]
+    assert code.index("__a10venue") < code.index('var __a10k = "vrcproxy:fixed";')
+    assert code.index("__a10venue") < code.index("SessionState.SetString")
+
+
+def test_no_guard_when_path_unresolved():
+    # Never guess a venue: guessing wrong refuses every call to the right one.
+    _, payload = ec.transform_request(
+        {"action": "execute", "code": "return 1;"}, VCFG, assets_path=None)
+    assert ec.VENUE_MISROUTE_MARKER not in payload["code"]
+    assert "__a10venue" not in payload["code"]
+
+
+def test_venue_guard_disabled_emits_nothing():
+    cfg = dict(VCFG, execute_code_venue_guard=False)
+    _, payload = ec.transform_request(
+        {"action": "execute", "code": "return 1;"}, cfg, assets_path="C:/proj/One/Assets")
+    assert "__a10venue" not in payload["code"]
+
+
+def test_venue_guard_survives_idempotency_guard_disabled():
+    # F7's rule: two behaviors, two toggles. Turning off the idempotency wrap must not
+    # silently take the venue check with it.
+    cfg = dict(VCFG, execute_code_idempotency_guard=False)
+    _, payload = ec.transform_request(
+        {"action": "execute", "code": "return 1;"}, cfg, assets_path="C:/proj/One/Assets")
+    assert "__a10venue" in payload["code"]
+    assert "__a10k" not in payload["code"]
+
+
+def test_venue_literal_is_not_path_normalized():
+    # The single likeliest implementation slip: running the literal through
+    # normpath/abspath would emit backslashes on Windows and refuse EVERY call.
+    _, payload = ec.transform_request(
+        {"action": "execute", "code": "return 1;"}, VCFG,
+        assets_path="C:/proj/One/Assets")
+    assert '"C:/proj/One/Assets"' in payload["code"]
+    assert "C:\\proj" not in payload["code"]
+
+
+# chr() rather than escapes in these two: the expectations are themselves strings full of
+# backslashes and quotes, and writing them inline invites the reader (and the author) to
+# miscount a level of escaping in the very test that proves the escaping is right.
+BS, QUOTE = chr(92), chr(34)
+
+
+def test_venue_literal_escapes_quote_and_backslash():
+    # A project path may hold either; unescaped, both break the generated snippet.
+    lit = ec.csharp_literal("C:" + BS + "pro" + QUOTE + "j/Assets")
+    assert lit == QUOTE + "C:" + BS + BS + "pro" + BS + QUOTE + "j/Assets" + QUOTE
+
+
+def test_venue_literal_escapes_non_ascii():
+    # Generated C# stays ASCII: a CodeDom temp-file mangle would otherwise yield a literal
+    # differing from Application.dataPath by exactly the mangled characters — a permanent,
+    # causeless false refusal in that project (G63's non-ASCII vendor path).
+    assert ec.csharp_literal("C:/proj/\u30e6\u30cb/Assets") == (
+        QUOTE + "C:/proj/" + BS + "u30e6" + BS + "u30cb/Assets" + QUOTE)
+    assert ec.csharp_literal("C:/p/\U0001F600/A") == (
+        QUOTE + "C:/p/" + BS + "U0001f600/A" + QUOTE)
+    assert all(ord(c) < 128 for c in ec.csharp_literal("C:/proj/\u00e9/Assets"))
+
+
+def test_trailing_separator_on_resolved_path_is_trimmed():
+    _, payload = ec.transform_request(
+        {"action": "execute", "code": "return 1;"}, VCFG,
+        assets_path="C:/proj/One/Assets/")
+    assert 'var __a10venue = "C:/proj/One/Assets";' in payload["code"]
+
+
+# --- response half: anchored, action-scoped marker recognition -------------
+def test_misroute_text_reads_data_result():
+    payload = {"success": True,
+               "data": {"result": ec.VENUE_MISROUTE_MARKER + " pinned to X", "compiler": "auto"}}
+    assert ec.misroute_text(payload).startswith(ec.VENUE_MISROUTE_MARKER)
+
+
+def test_misroute_text_ignores_marker_not_at_start():
+    # An ordinary snippet returning doc text that NAMES the token (docs/unity.md does,
+    # per the ratchet) must not be rewritten into a false error.
+    payload = {"success": True, "data": {"result":
+               "the doc says " + ec.VENUE_MISROUTE_MARKER + " means a wrong venue"}}
+    assert ec.misroute_text(payload) is None
+
+
+def test_misroute_text_ignores_history_payload():
+    # get_history echoes a 500-char codePreview of the SNIPPET SOURCE, which contains the
+    # marker as a literal — a raw substring match would fabricate a misroute here.
+    payload = {"success": True, "data": {"total": 1, "entries": [
+        {"codePreview": 'return "' + ec.VENUE_MISROUTE_MARKER + ' ...";',
+         "resultPreview": ec.VENUE_MISROUTE_MARKER + " this call was pinned to X"}]}}
+    assert ec.misroute_text(payload) is None

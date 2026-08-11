@@ -118,6 +118,72 @@ def _selects(hb, selector):
     return False
 
 
+def _is_port_selector(selector):
+    """A bare port number (stdio routing). Hashes are hex, so an all-digit selector is
+    ambiguous between port and hash-prefix — read as a port, the conservative arm: it
+    routes `resolve_assets_path` down the freshness-filtered path."""
+    return str(selector).strip().isdigit()
+
+
+def canonical_instance(selector, directory=None):
+    """`Name@hash` for `selector`, or None if it names other than exactly one heartbeat.
+
+    Called at pin-commit time so the SESSION pin is stored canonically. Without it a pin
+    spelled as a bare PORT (`set_active_instance(instance="6402")` — a documented form)
+    leaves `active_instance` on the port arm of `_is_port_selector` for the rest of the
+    session, so every later `resolve_assets_path` takes the freshness-filtered branch. A
+    block longer than `GUARD_WINDOW_S` then ages the heartbeat out, the pool loses the
+    match, and the venue guard silently stops being emitted — inside exactly the long-block
+    window the misroute needs, and with `instance_guard` unable to compensate because
+    `active_instance` is truthy. Canonicalizing moves the session onto the stale-tolerant
+    hash arm, which is the arm this module's asymmetry argument depends on.
+    """
+    matches = [hb for hb in read_heartbeats(directory) if _selects(hb, selector)]
+    if len(matches) != 1:
+        return None
+    hb = matches[0]
+    return f"{hb['project_name'] or hb['hash']}@{hb['hash']}"
+
+
+def resolve_assets_path(per_call_instance, active_instance, directory=None, now=None):
+    """Assets dir of the targeted Editor, or None when it cannot be resolved SAFELY.
+
+    Separate from `resolve_project_root` because the two have opposite risk profiles. That
+    one feeds a disk check that only ever *softens* a reported failure, so a stale heartbeat
+    costs an unverified note. This one feeds a fail-CLOSED guard: resolve to the wrong path
+    and every call to the correct venue is refused. So freshness matters here and not there,
+    and the filtering is deliberately asymmetric:
+
+      * A `Name@hash` / hash-prefix selector resolves against ALL heartbeats, stale
+        included. The Editor derives its hash as SHA1(Application.dataPath)[:8], so
+        hash -> assets path is a total function: a hash that matches at all matches the
+        right path, alive or not. Filtering here would drop the guard exactly when the
+        misroute bites — during a long block that ages the heartbeat out of the window.
+      * A PORT selector, or NO selector, resolves against live heartbeats only. Ports are
+        reused across projects (atelier#51) and a status file outlives a crashed Editor, so
+        a stale file can hand back a foreign project's path under a port that now belongs
+        to another Editor. The no-selector count is filtered for the same reason: stale
+        files inflate it, which would silently suppress the guard.
+
+    `now` is caller-supplied, matching `live_instances` — never sampled here. On the
+    freshness-filtered path a missing clock resolves to None (no guard) rather than
+    silently falling back to an unfiltered read.
+    """
+    selector = per_call_instance or active_instance
+    if selector and not _is_port_selector(selector):
+        pool = read_heartbeats(directory)
+    elif now is None:
+        return None
+    else:
+        pool = live_instances(directory, now)
+    if not selector:
+        return (pool[0]["assets_path"] or None) if len(pool) == 1 else None
+    # A prefix selector can match >1 Editor; resolving the first would guard against the
+    # WRONG venue and refuse every call. Resolve only on an unambiguous match.
+    matches = [hb for hb in pool if _selects(hb, selector)]
+    return (matches[0]["assets_path"] or None) if len(matches) == 1 else None
+
+
 def resolve_project_root(per_call_instance, active_instance, directory=None):
     """Project root dir (the folder containing Assets/) for the targeted Editor, or None.
 

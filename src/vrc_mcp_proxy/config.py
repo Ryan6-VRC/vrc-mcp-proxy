@@ -32,6 +32,7 @@ BEHAVIORS = (
     "execute_code_safety_off",
     "manage_scene_arg_guard",
     "manage_camera_screenshot_output",
+    "execute_code_venue_guard",
 )
 
 
