@@ -125,6 +125,26 @@ def _is_port_selector(selector):
     return str(selector).strip().isdigit()
 
 
+def canonical_instance(selector, directory=None):
+    """`Name@hash` for `selector`, or None if it names other than exactly one heartbeat.
+
+    Called at pin-commit time so the SESSION pin is stored canonically. Without it a pin
+    spelled as a bare PORT (`set_active_instance(instance="6402")` — a documented form)
+    leaves `active_instance` on the port arm of `_is_port_selector` for the rest of the
+    session, so every later `resolve_assets_path` takes the freshness-filtered branch. A
+    block longer than `GUARD_WINDOW_S` then ages the heartbeat out, the pool loses the
+    match, and the venue guard silently stops being emitted — inside exactly the long-block
+    window the misroute needs, and with `instance_guard` unable to compensate because
+    `active_instance` is truthy. Canonicalizing moves the session onto the stale-tolerant
+    hash arm, which is the arm this module's asymmetry argument depends on.
+    """
+    matches = [hb for hb in read_heartbeats(directory) if _selects(hb, selector)]
+    if len(matches) != 1:
+        return None
+    hb = matches[0]
+    return f"{hb['project_name'] or hb['hash']}@{hb['hash']}"
+
+
 def resolve_assets_path(per_call_instance, active_instance, directory=None, now=None):
     """Assets dir of the targeted Editor, or None when it cannot be resolved SAFELY.
 

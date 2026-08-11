@@ -175,14 +175,38 @@ class Proxy:
                 self._write_client(tool_error_result(req_id, refusal))
                 return
 
+        venue = None  # set only on the execute_code path; read by _remember below
         if name == "execute_code":
             # Resolve the pinned venue for the guard. Same two knobs the server routes on,
             # read at request time so a later set_active_instance can't retarget this call.
-            venue = None
             if self.cfg.get("execute_code_venue_guard", True):
+                per_call = (arguments.get("unity_instance")
+                            if isinstance(arguments, dict) else None)
                 venue = instances.resolve_assets_path(
-                    arguments.get("unity_instance") if isinstance(arguments, dict) else None,
-                    self.active_instance, now=datetime.now(timezone.utc))
+                    per_call, self.active_instance, now=datetime.now(timezone.utc))
+                selector = per_call or self.active_instance
+                # A pin that names nothing among the editors we CAN see is refused rather
+                # than forwarded unguarded. Silence here is the dangerous arm: the doc line
+                # telling agents to hand-write their own check retires with this behavior,
+                # so an unguarded forward is a call nobody is checking. This is not the
+                # "never guess a venue" rule inverted — refusing on unresolvable is the
+                # opposite of guessing.
+                #
+                # Gated on the directory being non-empty. With no heartbeats at all we
+                # cannot distinguish "your pin is wrong" from "I can't see any editors"
+                # (UNITY_MCP_STATUS_DIR relocates them and this module reads only the
+                # default), and refusing every call on an unreadable directory would be a
+                # far worse failure than the one being closed.
+                if venue is None and selector and instances.read_heartbeats():
+                    self._write_client(tool_error_result(
+                        req_id,
+                        f"[vrc-mcp-proxy] the pinned instance {selector!r} does not resolve "
+                        f"to exactly one live Unity editor, so the venue this snippet would "
+                        f"run in cannot be established and the call is refused rather than "
+                        f"run unchecked. Re-pin with the full Name@hash via "
+                        f"set_active_instance (a bare port or a hash prefix can go stale or "
+                        f"match more than one), or route this call with unity_instance."))
+                    return
             action, payload = execute_code.transform_request(
                 arguments, self.cfg, assets_path=venue)
             if action == "refuse":
@@ -213,7 +237,8 @@ class Proxy:
             if name == "set_active_instance" and isinstance(arguments, dict) else None)
         self._remember(req_id, "tools/call", name, arguments,
                        active_snapshot=self.active_instance,
-                       requested_instance=requested_instance)
+                       requested_instance=requested_instance,
+                       venue_guarded=bool(venue))
         # F52 watchdog: arm ONLY on execute_code/execute (the exact gate execute_code.py:88
         # transforms on). Armed before forwarding so pending+timer are set before the child
         # can respond; a fast response cancels it in _take.
@@ -271,7 +296,13 @@ class Proxy:
         # Commit a set_active_instance only once its response comes back successful.
         if name == "set_active_instance" and info.get("requested_instance") is not None \
                 and not is_error_result(msg):
-            self.active_instance = info["requested_instance"]
+            # Store the pin CANONICALLY (Name@hash). A bare-port pin left raw would put
+            # every later venue resolve on the freshness-filtered arm for the whole
+            # session — see instances.canonical_instance. Unresolvable: keep the raw value,
+            # which still pins routing upstream and still satisfies instance_guard.
+            self.active_instance = (
+                instances.canonical_instance(info["requested_instance"])
+                or info["requested_instance"])
             # Surface the resolved project root on the pin itself (G50-B): a wrong pin is
             # then legible from the tool result, not just from a later instance_guard block.
             # Gated on its own `proxy_project_root` behavior (F7), not instance_guard —
@@ -297,7 +328,11 @@ class Proxy:
         # manage_asset.py's "NO string matching" rule is about). Scoped to action=="execute"
         # and anchored inside misroute_text — see its docstring for the get_history echo that
         # a looser match would misfire on.
+        # Bound to a call we actually guarded (`venue_guarded`): a snippet that legitimately
+        # returns marker-leading text on an UNGUARDED call was not produced by anything the
+        # proxy injected, so rewriting it would be a fabricated error.
         if self.cfg.get("execute_code_venue_guard", True) and name == "execute_code" \
+                and info.get("venue_guarded") \
                 and isinstance(args, dict) and args.get("action") == "execute":
             text, _idx = first_text_payload(msg)
             if text is not None:
@@ -321,7 +356,7 @@ class Proxy:
 
     # --- pending-request bookkeeping --------------------------------------
     def _remember(self, req_id, method, tool, args,
-                  active_snapshot=None, requested_instance=None):
+                  active_snapshot=None, requested_instance=None, venue_guarded=False):
         stale_timer = None
         with self._pending_lock:
             if req_id in self.pending:
@@ -350,7 +385,8 @@ class Proxy:
                 stale_timer = self._timers.pop(req_id, None)
             self.pending[req_id] = {"method": method, "tool": tool, "args": args,
                                     "active": active_snapshot,
-                                    "requested_instance": requested_instance}
+                                    "requested_instance": requested_instance,
+                                    "venue_guarded": venue_guarded}
         # Cancel OUTSIDE the lock — _pending_lock is never held across other blocking work.
         if stale_timer is not None:
             stale_timer.cancel()
