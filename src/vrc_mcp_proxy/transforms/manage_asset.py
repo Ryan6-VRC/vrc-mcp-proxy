@@ -17,7 +17,7 @@ value — orphan-meta / unclean-delete detection.
 import json
 import os
 
-from ..envelope import first_text_payload
+from ..envelope import first_text_payload, write_payload
 from ..instances import resolve_project_root
 
 _MOVE_ACTIONS = frozenset({"move", "rename"})
@@ -153,8 +153,10 @@ def correct_response(msg, arguments, active_instance, directory=None):
                     if key in payload:
                         payload[f"upstream_{key}"] = payload.pop(key)
                 payload["proxy_note"] = (
-                    f"upstream reported failure but the move succeeded on disk "
-                    f"(verified {src_rel} -> {dst_rel})"
+                    f"upstream reported failure but {dst_rel} exists on disk and "
+                    f"{src_rel} does not — the move is inferred to have landed, not "
+                    f"observed. A move whose source never existed onto a destination "
+                    f"that already did looks identical from here."
                 )
             else:
                 payload["proxy_note"] = (
@@ -163,8 +165,7 @@ def correct_response(msg, arguments, active_instance, directory=None):
                     f"{os.path.exists(dst_abs)}); move did not occur."
                 )
 
-    msg["result"]["content"][idx]["text"] = json.dumps(payload)
-    return msg
+    return write_payload(msg, idx, payload, text)
 
 
 def correct_delete_response(msg, arguments, active_instance, directory=None):
@@ -232,5 +233,4 @@ def correct_delete_response(msg, arguments, active_instance, directory=None):
                     f"({path_rel} still exists); delete did not occur."
                 )
 
-    msg["result"]["content"][idx]["text"] = json.dumps(payload)
-    return msg
+    return write_payload(msg, idx, payload, text)

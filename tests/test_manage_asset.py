@@ -3,6 +3,7 @@ import os
 
 import pytest
 
+from helpers import make_result, payload_of, structured_of
 from vrc_mcp_proxy.transforms import manage_asset
 
 
@@ -10,12 +11,11 @@ def _failure_msg(payload=None):
     payload = payload or {"success": False,
                           "error": "MoveAsset call failed unexpectedly",
                           "code": "MoveAsset call failed unexpectedly"}
-    return {"jsonrpc": "2.0", "id": 1, "result": {
-        "content": [{"type": "text", "text": json.dumps(payload)}], "isError": False}}
+    return make_result(payload=payload, is_error=False)
 
 
 def _payload(msg):
-    return json.loads(msg["result"]["content"][0]["text"])
+    return payload_of(msg)
 
 
 @pytest.fixture
@@ -40,12 +40,16 @@ def test_moved_in_fact_is_corrected(project):
     out = manage_asset.correct_response(_failure_msg(), args, None, directory=hb)
     p = _payload(out)
     assert p["success"] is True
-    assert "succeeded on disk" in p["proxy_note"]
+    assert "inferred to have landed" in p["proxy_note"]
     # No live error/code keys may remain on a success-rewritten response; the upstream
     # strings move to upstream_* instead.
     assert "error" not in p and "code" not in p
     assert p["upstream_error"] == "MoveAsset call failed unexpectedly"
     assert p["upstream_code"] == "MoveAsset call failed unexpectedly"
+    # The verdict has to reach the surface the client reads, and the popped error/code
+    # must not survive there: a merge-style write would leave `success:true` sitting
+    # beside the original `error`, which is the disagreement this transform is fixing.
+    assert structured_of(out) == p
 
 
 def test_genuine_failure_stays_failed(project):
@@ -58,6 +62,7 @@ def test_genuine_failure_stays_failed(project):
     p = _payload(out)
     assert p["success"] is False
     assert "consistent with the reported failure" in p["proxy_note"]
+    assert structured_of(out) == p
 
 
 def test_unresolvable_root_is_annotated(tmp_path):
@@ -90,7 +95,32 @@ def test_prefixless_move_corrected(project):
     out = manage_asset.correct_response(_failure_msg(), args, None, directory=hb)
     p = _payload(out)
     assert p["success"] is True
-    assert "succeeded on disk" in p["proxy_note"]
+    assert "inferred to have landed" in p["proxy_note"]
+
+
+def test_move_rewrite_does_not_claim_more_than_it_observed(project):
+    """A move whose SOURCE never existed, onto a destination that ALREADY existed, is
+    indistinguishable on disk from a move that landed: dest present, source absent. The
+    rewrite still fires (that ambiguity is inherent to a two-stat check), so the note must
+    disclose the inference rather than report a verified move — the delete arm has always
+    said "inferred from absence", and this arm claimed "verified" on the same evidence.
+    """
+    root, hb = project
+    dst = root / "Assets" / "Bar" / "a.mat"
+    dst.parent.mkdir(parents=True)
+    dst.write_text("was already here, nothing moved onto it")
+    args = {"action": "move", "path": "Assets/Foo/never-existed.mat",
+            "destination": "Assets/Bar/a.mat"}
+    out = manage_asset.correct_response(
+        _failure_msg({"success": False, "error": "Source asset not found",
+                      "code": "Source asset not found"}),
+        args, None, directory=hb)
+    p = _payload(out)
+    assert p["success"] is True
+    note = p["proxy_note"]
+    assert "verified" not in note
+    assert "inferred" in note and "not observed" in note
+    assert structured_of(out) == p
 
 
 def test_traversal_path_is_unverifiable(project):
@@ -146,6 +176,7 @@ def test_deleted_in_fact_is_corrected(project):
     assert "error" not in p and "code" not in p
     assert p["upstream_error"] == "DeleteAsset call failed unexpectedly"
     assert p["upstream_code"] == "DeleteAsset call failed unexpectedly"
+    assert structured_of(out) == p
 
 
 def test_delete_genuine_failure_stays_failed(project):

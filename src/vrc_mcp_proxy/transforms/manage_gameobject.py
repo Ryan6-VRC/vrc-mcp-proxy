@@ -13,7 +13,7 @@ Keyed on the bridge's lookup-failure string, which is the C# **Unity package's**
 pinned Python server's: it moves on its own release cadence. A stale key only costs the
 note; the note never rewrites a verdict.
 """
-from ..envelope import result_content
+from ..envelope import add_note, result_content
 
 # MCPForUnity Editor/Tools/GameObjects/*.cs — every target-lookup miss returns
 # `Target GameObject('<t>') not found using method '<m>'.`
@@ -50,12 +50,16 @@ def _has_lookup_miss(msg):
 
 
 def annotate(msg, arguments):
-    """Append the note to a manage_gameobject response whose target lookup missed."""
+    """Append the note to a manage_gameobject response whose target lookup missed.
+
+    Detection reads `content` only, and that stays the authoritative surface for it:
+    upstream writes both surfaces from one value, and `add_note` is what keeps them in
+    step afterwards.
+    """
     if not is_lookup_action(arguments) or not _has_lookup_miss(msg):
         return msg
-    content = result_content(msg)
-    if content is not None:
-        content.append({"type": "text", "text": NOTE_TEXT})
+    if result_content(msg) is not None:
+        add_note(msg, NOTE_TEXT)
     elif isinstance(msg.get("error"), dict):
         msg["error"]["message"] = (
             str(msg["error"].get("message", "")) + "\n" + NOTE_TEXT)

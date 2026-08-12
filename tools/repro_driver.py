@@ -90,8 +90,19 @@ class MCPClient:
                 parsed = json.loads(texts[0])
             except (json.JSONDecodeError, TypeError):
                 parsed = texts[0]
+        structured = res.get("structuredContent")
+        # The two surfaces of one result must agree. They disagreed silently for the life
+        # of the proxy — four response transforms wrote `content` alone while every client
+        # reads `structuredContent` — and this driver has returned both halves all along
+        # without ever comparing them. A bump that reshapes either half (e.g. gives a tool
+        # x-fastmcp-wrap-result) surfaces here instead of in a live session.
+        if isinstance(structured, dict) and isinstance(parsed, dict) and structured != parsed:
+            record("surface-disagreement", "CHECK",
+                   f"{name}: content payload != structuredContent; "
+                   f"content-only keys={sorted(set(parsed) - set(structured))}, "
+                   f"structured-only keys={sorted(set(structured) - set(parsed))}")
         return {"isError": res.get("isError", False), "payload": parsed,
-                "raw_texts": texts, "structured": res.get("structuredContent")}
+                "raw_texts": texts, "structured": structured}
 
 
 def main():

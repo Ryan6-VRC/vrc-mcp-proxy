@@ -1,16 +1,19 @@
+from helpers import make_result, structured_of, texts_of
+from vrc_mcp_proxy.envelope import TRANSPORT_NOTE_KEY
 from vrc_mcp_proxy.transforms import manage_gameobject as mg
 
 MISS = "Target GameObject(s) ('Manuka_underwear_bra') not found using method 'by_path'."
 
 
 def _result(text, is_error=True):
-    return {"jsonrpc": "2.0", "id": 1,
-            "result": {"content": [{"type": "text", "text": text}],
-                       "isError": is_error}}
+    # Shaped like the bridge's: a JSON payload carrying the miss string, mirrored into
+    # structuredContent. manage_gameobject swallows a lookup miss into a success-shaped
+    # dict rather than raising, so its results DO carry structuredContent.
+    return make_result(payload={"success": not is_error, "error": text}, is_error=is_error)
 
 
 def _texts(msg):
-    return [b["text"] for b in msg["result"]["content"]]
+    return texts_of(msg)
 
 
 def test_note_appended_on_lookup_miss():
@@ -22,6 +25,9 @@ def test_note_appended_on_lookup_miss():
     assert "set_active:true" in note
     assert "instanceId" in note
     assert "transform.Find" in note
+    # …and it has to reach the surface the client reads, under its own key: manage_asset
+    # owns `proxy_note` in the payload, and one response can carry both.
+    assert structured_of(msg)[TRANSPORT_NOTE_KEY] == note
 
 
 def test_note_appended_for_every_lookup_action():
@@ -52,6 +58,8 @@ def test_jsonrpc_error_object_gets_the_note():
     out = mg.annotate(msg, {"action": "delete"})
     assert mg.NOTE_TEXT in out["error"]["message"]
     assert MISS in out["error"]["message"]
+    # A JSON-RPC error object has no result at all; nothing may be fabricated on it.
+    assert "result" not in out
 
 
 def test_non_dict_arguments_tolerated():
