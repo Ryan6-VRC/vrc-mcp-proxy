@@ -27,6 +27,7 @@ from .envelope import (
     is_notification,
     is_request,
     tool_error_result,
+    write_payload,
 )
 from .transforms import (
     execute_code,
@@ -316,7 +317,8 @@ class Proxy:
                         payload = json.loads(text)
                         if isinstance(payload, dict):
                             payload["proxy_project_root"] = root or "unresolved"
-                            msg["result"]["content"][idx]["text"] = json.dumps(payload)
+                            write_payload(msg, idx, payload, text,
+                                          "proxy_project_root")
                     except (json.JSONDecodeError, TypeError):
                         pass
         # A venue refusal comes back as a SUCCESS payload — the snippet returned a string, so

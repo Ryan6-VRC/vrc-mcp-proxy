@@ -1,9 +1,16 @@
+from helpers import make_result, structured_of
+from vrc_mcp_proxy.envelope import TRANSPORT_NOTE_KEY
 from vrc_mcp_proxy.transforms import timeouts
 
 
 def _result_msg(text):
-    return {"jsonrpc": "2.0", "id": 1, "result": {
-        "content": [{"type": "text", "text": text}], "isError": True}}
+    # The shape that needs this note: a tool which SWALLOWS the transport timeout into a
+    # success-shaped dict (manage_gameobject, manage_scene, manage_editor,
+    # find_gameobjects) — so no isError, and structuredContent present. A tool that lets
+    # the timeout raise returns isError with NO structuredContent, which is the separate
+    # fixture in test_note_reaches_content_only_when_there_is_no_structured_content; its
+    # note has always reached the client through content.
+    return make_result(payload={"success": False, "error": text})
 
 
 def test_marker_in_result_appends_note_block():
@@ -12,6 +19,16 @@ def test_marker_in_result_appends_note_block():
     blocks = out["result"]["content"]
     assert len(blocks) == 2
     assert "does NOT mean the operation didn't run" in blocks[-1]["text"]
+    assert "does NOT mean the operation didn't run" in structured_of(out)[TRANSPORT_NOTE_KEY]
+
+
+def test_note_reaches_content_only_when_there_is_no_structured_content():
+    msg = make_result(payload={"success": False,
+                               "error": "Timeout receiving Unity response"},
+                      structured=None, is_error=True)
+    out = timeouts.annotate(msg)
+    assert len(out["result"]["content"]) == 2
+    assert "structuredContent" not in out["result"]
 
 
 def test_deadline_marker_matches():
@@ -31,3 +48,17 @@ def test_marker_in_jsonrpc_error_message():
            "error": {"code": -32000, "message": "Timeout receiving Unity response"}}
     out = timeouts.annotate(msg)
     assert "verify on disk" in out["error"]["message"]
+    assert "result" not in out  # nothing fabricated on the error-object arm
+
+
+def test_two_notes_on_one_response_concatenate():
+    """manage_gameobject's note and this one can both fire on one response. They share the
+    structuredContent key, so the second must append rather than clobber the first."""
+    from vrc_mcp_proxy.transforms import manage_gameobject as mg
+    miss = ("Timeout receiving Unity response; Target GameObject ('x') not found using "
+            "method 'by_name'.")
+    msg = make_result(payload={"success": False, "error": miss})  # a swallowing tool
+    out = timeouts.annotate(mg.annotate(msg, {"action": "delete"}))
+    assert len(out["result"]["content"]) == 3  # payload + one block per note
+    note = structured_of(out)[TRANSPORT_NOTE_KEY]
+    assert mg.NOTE_TEXT in note and timeouts.NOTE_TEXT in note

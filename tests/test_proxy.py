@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
+from helpers import make_result_line, payload_of, structured_of
 from vrc_mcp_proxy import canary, config, instances
 from vrc_mcp_proxy.proxy import Proxy, _DEFAULT_EXECUTE_TIMEOUT_S, _read_execute_timeout
 
@@ -64,8 +65,7 @@ def _set_active_request(rid, instance):
 
 
 def _response(rid, is_error):
-    return json.dumps({"jsonrpc": "2.0", "id": rid, "result": {
-        "content": [{"type": "text", "text": "x"}], "isError": is_error}})
+    return make_result_line(rid, text="x", is_error=is_error)
 
 
 def test_active_instance_committed_only_on_success():
@@ -212,8 +212,7 @@ def test_instance_guard_ignores_stale_heartbeats(tmp_path, monkeypatch):
 
 # --- G50-B: proxy_project_root surfaced on a successful pin ----------------
 def _json_response(rid, payload, is_error=False):
-    return json.dumps({"jsonrpc": "2.0", "id": rid, "result": {
-        "content": [{"type": "text", "text": json.dumps(payload)}], "isError": is_error}})
+    return make_result_line(rid, payload=payload, is_error=is_error)
 
 
 def test_set_active_instance_success_gains_proxy_project_root(tmp_path, monkeypatch):
@@ -225,8 +224,12 @@ def test_set_active_instance_success_gains_proxy_project_root(tmp_path, monkeypa
     p.handle_child_line(_json_response(1, {"ok": True}))
 
     [line] = p.client_out.lines
-    payload = json.loads(json.loads(line)["result"]["content"][0]["text"])
-    assert payload == {"ok": True, "proxy_project_root": "C:/proj/One"}
+    msg = json.loads(line)
+    expected = {"ok": True, "proxy_project_root": "C:/proj/One"}
+    assert payload_of(msg) == expected
+    # The surface the client actually reads. Asserting `content` alone is what let this
+    # behavior ship without ever reaching a caller.
+    assert structured_of(msg) == expected
 
 
 def test_set_active_instance_success_unresolved_root(tmp_path, monkeypatch):
@@ -238,8 +241,9 @@ def test_set_active_instance_success_unresolved_root(tmp_path, monkeypatch):
     p.handle_child_line(_json_response(1, {"ok": True}))
 
     [line] = p.client_out.lines
-    payload = json.loads(json.loads(line)["result"]["content"][0]["text"])
-    assert payload["proxy_project_root"] == "unresolved"
+    msg = json.loads(line)
+    assert payload_of(msg)["proxy_project_root"] == "unresolved"
+    assert structured_of(msg)["proxy_project_root"] == "unresolved"
 
 
 def test_set_active_instance_error_response_unchanged(tmp_path, monkeypatch):
@@ -251,8 +255,9 @@ def test_set_active_instance_error_response_unchanged(tmp_path, monkeypatch):
     p.handle_child_line(_json_response(1, {"error": "nope"}, is_error=True))
 
     [line] = p.client_out.lines
-    payload = json.loads(json.loads(line)["result"]["content"][0]["text"])
-    assert "proxy_project_root" not in payload
+    msg = json.loads(line)
+    assert "proxy_project_root" not in payload_of(msg)
+    assert "proxy_project_root" not in structured_of(msg)
 
 
 # --- F7: proxy_project_root is its own behavior, decoupled from instance_guard ----------
@@ -267,9 +272,11 @@ def test_set_active_instance_success_no_proxy_project_root_when_disabled(
     p.handle_child_line(_json_response(1, {"ok": True}))
 
     [line] = p.client_out.lines
-    payload = json.loads(json.loads(line)["result"]["content"][0]["text"])
-    assert payload == {"ok": True}
-    assert "proxy_project_root" not in payload
+    msg = json.loads(line)
+    assert payload_of(msg) == {"ok": True}
+    # Disabled means BOTH surfaces are left alone — a toggle that only gated the content
+    # write would leave a stray structuredContent mutation behind.
+    assert structured_of(msg) == {"ok": True}
     # the active_instance commit itself is a separate concern and must still happen
     assert p.active_instance == "One@aaaa1111"
 
@@ -287,8 +294,65 @@ def test_set_active_instance_proxy_project_root_survives_instance_guard_disabled
     p.handle_child_line(_json_response(1, {"ok": True}))
 
     [line] = p.client_out.lines
-    payload = json.loads(json.loads(line)["result"]["content"][0]["text"])
-    assert payload["proxy_project_root"] == "C:/proj/One"
+    msg = json.loads(line)
+    assert payload_of(msg)["proxy_project_root"] == "C:/proj/One"
+    assert structured_of(msg)["proxy_project_root"] == "C:/proj/One"
+
+
+def test_set_active_instance_wrapped_structured_content_stays_wrapped(
+        tmp_path, monkeypatch):
+    # A x-fastmcp-wrap-result tool's structuredContent is {"result": <payload>} while its
+    # content text is the bare payload. The wrapper is provable, so it is written — with
+    # the schema's required `result` key intact.
+    monkeypatch.setattr(instances, "DEFAULT_DIR", str(tmp_path))
+    _write_hb(tmp_path, "aaaa1111", 6401, "C:/proj/One", "One")
+    p = _proxy(_guard_cfg())
+
+    p.handle_client_line(_set_active_request(1, "One@aaaa1111"))
+    p.handle_child_line(make_result_line(
+        1, payload={"ok": True}, structured={"result": {"ok": True}}, is_error=False))
+
+    [line] = p.client_out.lines
+    msg = json.loads(line)
+    assert payload_of(msg)["proxy_project_root"] == "C:/proj/One"
+    assert structured_of(msg) == {
+        "result": {"ok": True, "proxy_project_root": "C:/proj/One"}}
+
+
+def test_set_active_instance_unprovable_shape_changes_nothing(
+        tmp_path, monkeypatch, capsys):
+    # Neither a mirror nor a wrapper: both surfaces are left as upstream sent them.
+    monkeypatch.setattr(instances, "DEFAULT_DIR", str(tmp_path))
+    _write_hb(tmp_path, "aaaa1111", 6401, "C:/proj/One", "One")
+    p = _proxy(_guard_cfg())
+
+    p.handle_client_line(_set_active_request(1, "One@aaaa1111"))
+    p.handle_child_line(make_result_line(
+        1, payload={"ok": True}, structured={"reshaped": True}, is_error=False))
+
+    [line] = p.client_out.lines
+    msg = json.loads(line)
+    assert "proxy_project_root" not in payload_of(msg)
+    assert structured_of(msg) == {"reshaped": True}
+    assert "proxy_project_root" in capsys.readouterr().err  # the label names the behavior
+    assert p.active_instance == "One@aaaa1111"  # the pin commit is unaffected
+
+
+def test_response_without_structured_content_still_transforms(tmp_path, monkeypatch):
+    # manage_camera is the one baseline tool with no outputSchema, so its results carry no
+    # structuredContent at all. The key must not be invented.
+    monkeypatch.setattr(instances, "DEFAULT_DIR", str(tmp_path))
+    _write_hb(tmp_path, "aaaa1111", 6401, "C:/proj/One", "One")
+    p = _proxy(_guard_cfg())
+
+    p.handle_client_line(_set_active_request(1, "One@aaaa1111"))
+    p.handle_child_line(make_result_line(
+        1, payload={"ok": True}, structured=None, is_error=False))
+
+    [line] = p.client_out.lines
+    msg = json.loads(line)
+    assert payload_of(msg)["proxy_project_root"] == "C:/proj/One"
+    assert "structuredContent" not in msg["result"]
 
 
 # --- request-side wiring for the manage_scene / manage_camera transforms ----
@@ -362,9 +426,7 @@ def _execute_request(rid, code="return 1;", action="execute"):
 
 
 def _result(rid, payload):
-    return json.dumps({"jsonrpc": "2.0", "id": rid,
-                       "result": {"content": [{"type": "text",
-                                               "text": json.dumps(payload)}]}})
+    return make_result_line(rid, payload=payload)  # no isError key, like upstream's
 
 
 def _venue_proxy():
@@ -386,6 +448,10 @@ def test_venue_refusal_is_rewritten_to_an_error(monkeypatch):
     out = json.loads(p.client_out.lines[-1])
     assert out["result"]["isError"] is True
     assert VENUE_MISROUTE_MARKER in out["result"]["content"][0]["text"]
+    # A refusal REPLACES the result rather than editing it, which is why this arm was
+    # never affected by the two-surface bug: no structuredContent to disagree with, and
+    # the client skips its outputSchema check on an isError result.
+    assert "structuredContent" not in out["result"]
 
 
 def test_get_history_echoing_the_marker_is_not_rewritten(monkeypatch):

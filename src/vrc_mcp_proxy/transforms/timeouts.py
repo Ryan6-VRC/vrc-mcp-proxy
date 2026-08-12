@@ -4,8 +4,15 @@ Upstream's stdio deadlines are hardcoded (not env-tunable). When a tools/call co
 with one of the timeout markers, we append a note: the Unity-side work may have completed
 (and an unguarded snippet may even have run more than once via transport retry) — verify
 on disk before retrying.
+
+Two response shapes reach this, and only one needed the structuredContent half. A tool
+that lets the transport exception propagate (execute_code, manage_asset) comes back as
+isError with no structuredContent at all, so this note has always reached the client
+through `content`. The tools that SWALLOW the timeout into a success-shaped dict —
+manage_gameobject, manage_scene, manage_editor, find_gameobjects — carry
+structuredContent, and there the note went nowhere until `add_note` started writing both.
 """
-from ..envelope import result_content
+from ..envelope import add_note, result_content
 
 TIMEOUT_MARKERS = (
     "Timeout receiving Unity response",
@@ -37,9 +44,8 @@ def annotate(msg):
     """Append the timeout note to a tools/call response carrying a timeout marker."""
     if not _has_marker(msg):
         return msg
-    content = result_content(msg)
-    if content is not None:
-        content.append({"type": "text", "text": NOTE_TEXT})
+    if result_content(msg) is not None:
+        add_note(msg, NOTE_TEXT)
     elif isinstance(msg.get("error"), dict):
         msg["error"]["message"] = str(msg["error"].get("message", "")) + "\n" + NOTE_TEXT
     return msg

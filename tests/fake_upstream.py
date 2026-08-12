@@ -1,8 +1,15 @@
 """A scripted fake MCP-for-Unity child for the end-to-end relay test. Reads
-newline-delimited JSON-RPC on stdin, emits canned responses on stdout. No Unity."""
+newline-delimited JSON-RPC on stdin, emits canned responses on stdout. No Unity.
+
+Its tools/call responses carry `structuredContent` beside `content`, like the real
+server's — see helpers.make_result. Emitting `content` alone made the e2e suite as blind
+as the unit fixtures were.
+"""
 import json
 import sys
 import threading
+
+from helpers import make_result  # same directory; sys.path[0] when run as a script
 
 
 def respond(obj):
@@ -51,18 +58,15 @@ def main():
                 for r in withheld:
                     respond(r)
                 withheld.clear()
-                respond({"jsonrpc": "2.0", "id": rid, "result": {
-                    "content": [{"type": "text", "text": "released"}], "isError": False}})
+                respond(make_result(rid, text="released", is_error=False))
                 continue
             if isinstance(args, dict) and args.get("hold"):
-                withheld.append({"jsonrpc": "2.0", "id": rid, "result": {"content": [
-                    {"type": "text", "text": json.dumps(
-                        {"tool": name, "ok": True, "real": True})}], "isError": False}})
+                withheld.append(make_result(
+                    rid, payload={"tool": name, "ok": True, "real": True}, is_error=False))
                 continue
             if isinstance(args, dict) and args.get("delay_s"):
-                resp = {"jsonrpc": "2.0", "id": rid, "result": {"content": [
-                    {"type": "text", "text": json.dumps(
-                        {"tool": name, "ok": True, "real": True})}], "isError": False}}
+                resp = make_result(
+                    rid, payload={"tool": name, "ok": True, "real": True}, is_error=False)
                 t = threading.Timer(float(args["delay_s"]), respond, args=(resp,))
                 t.daemon = True
                 t.start()
@@ -72,10 +76,10 @@ def main():
             # this process actually received on its own stdin — e.g. the G63 real-stdio
             # test, which checks a non-ASCII argument survived the proxy's client-facing
             # leg byte-for-byte.
-            respond({"jsonrpc": "2.0", "id": rid, "result": {
-                "content": [{"type": "text", "text": json.dumps(
-                    {"tool": name, "ok": True, "arguments": params.get("arguments")})}],
-                "isError": False}})
+            respond(make_result(
+                rid,
+                payload={"tool": name, "ok": True, "arguments": params.get("arguments")},
+                is_error=False))
         else:
             respond({"jsonrpc": "2.0", "id": rid, "result": {}})
 
