@@ -317,7 +317,8 @@ class Proxy:
                         payload = json.loads(text)
                         if isinstance(payload, dict):
                             payload["proxy_project_root"] = root or "unresolved"
-                            write_payload(msg, idx, payload, text)
+                            write_payload(msg, idx, payload, text,
+                                          "proxy_project_root")
                     except (json.JSONDecodeError, TypeError):
                         pass
         # A venue refusal comes back as a SUCCESS payload — the snippet returned a string, so

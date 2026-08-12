@@ -299,11 +299,11 @@ def test_set_active_instance_proxy_project_root_survives_instance_guard_disabled
     assert structured_of(msg)["proxy_project_root"] == "C:/proj/One"
 
 
-def test_set_active_instance_wrapped_structured_content_is_left_alone(
-        tmp_path, monkeypatch, capsys):
+def test_set_active_instance_wrapped_structured_content_stays_wrapped(
+        tmp_path, monkeypatch):
     # A x-fastmcp-wrap-result tool's structuredContent is {"result": <payload>} while its
-    # content text is the bare payload, so the two never deep-equal and the proxy must not
-    # overwrite the wrapper. content still gets the key; the mismatch is announced.
+    # content text is the bare payload. The wrapper is provable, so it is written — with
+    # the schema's required `result` key intact.
     monkeypatch.setattr(instances, "DEFAULT_DIR", str(tmp_path))
     _write_hb(tmp_path, "aaaa1111", 6401, "C:/proj/One", "One")
     p = _proxy(_guard_cfg())
@@ -315,8 +315,27 @@ def test_set_active_instance_wrapped_structured_content_is_left_alone(
     [line] = p.client_out.lines
     msg = json.loads(line)
     assert payload_of(msg)["proxy_project_root"] == "C:/proj/One"
-    assert structured_of(msg) == {"result": {"ok": True}}  # untouched, still schema-valid
-    assert "structuredContent does not match" in capsys.readouterr().err
+    assert structured_of(msg) == {
+        "result": {"ok": True, "proxy_project_root": "C:/proj/One"}}
+
+
+def test_set_active_instance_unprovable_shape_changes_nothing(
+        tmp_path, monkeypatch, capsys):
+    # Neither a mirror nor a wrapper: both surfaces are left as upstream sent them.
+    monkeypatch.setattr(instances, "DEFAULT_DIR", str(tmp_path))
+    _write_hb(tmp_path, "aaaa1111", 6401, "C:/proj/One", "One")
+    p = _proxy(_guard_cfg())
+
+    p.handle_client_line(_set_active_request(1, "One@aaaa1111"))
+    p.handle_child_line(make_result_line(
+        1, payload={"ok": True}, structured={"reshaped": True}, is_error=False))
+
+    [line] = p.client_out.lines
+    msg = json.loads(line)
+    assert "proxy_project_root" not in payload_of(msg)
+    assert structured_of(msg) == {"reshaped": True}
+    assert "proxy_project_root" in capsys.readouterr().err  # the label names the behavior
+    assert p.active_instance == "One@aaaa1111"  # the pin commit is unaffected
 
 
 def test_response_without_structured_content_still_transforms(tmp_path, monkeypatch):

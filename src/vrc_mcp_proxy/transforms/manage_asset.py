@@ -165,7 +165,7 @@ def correct_response(msg, arguments, active_instance, directory=None):
                     f"{os.path.exists(dst_abs)}); move did not occur."
                 )
 
-    return write_payload(msg, idx, payload, text)
+    return write_payload(msg, idx, payload, text, "manage_asset move truth-correction")
 
 
 def correct_delete_response(msg, arguments, active_instance, directory=None):
@@ -233,4 +233,4 @@ def correct_delete_response(msg, arguments, active_instance, directory=None):
                     f"({path_rel} still exists); delete did not occur."
                 )
 
-    return write_payload(msg, idx, payload, text)
+    return write_payload(msg, idx, payload, text, "manage_asset delete truth-correction")

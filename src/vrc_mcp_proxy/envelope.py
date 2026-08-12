@@ -75,7 +75,12 @@ TRANSPORT_NOTE_KEY = "proxy_transport_note"
 
 
 def _structured(msg):
-    """The result's structuredContent if it is a dict we can safely write, else None."""
+    """The result's structuredContent if it is a dict we can safely add a key to, else None.
+
+    A present-but-non-dict value returns None like an absent one, so `add_note`'s caller
+    must distinguish the two itself if it wants to say so — collapsing them here silently
+    is what the fail-loud rule forbids.
+    """
     res = msg.get("result")
     if not isinstance(res, dict):
         return None
@@ -83,40 +88,64 @@ def _structured(msg):
     return structured if isinstance(structured, dict) else None
 
 
-def write_payload(msg, idx, payload, original_text):
-    """Write a mutated `payload` to BOTH surfaces of a tools/call result.
+def _canonical(value):
+    """A comparable serialization. `==` alone is not proof of identical JSON: Python reads
+    `{"success": 0}` and `{"success": False}` as equal, so a reshape differing only in
+    bool-vs-int would pass a check whose whole premise is proving rather than guessing."""
+    return json.dumps(value, sort_keys=True)
 
-    `content[idx].text` always gets it. `structuredContent` gets it only when we can prove
-    the two surfaces held the same object to begin with — i.e. it deep-equals the payload
-    as parsed from `original_text`, before the caller mutated it.
 
-    That agreement check is the whole defense against the shapes where the two surfaces
-    legitimately differ. `content` is a serialization of the tool's return value;
-    `structuredContent` is a serialization of the return value POSSIBLY WRAPPED — FastMCP
-    emits `{"result": <value>}` for a tool whose outputSchema carries
-    `x-fastmcp-wrap-result` (measured on the pinned 3.4.7; `refresh_unity` is one such
-    tool, and it is allowlisted). Blind-writing the unwrapped payload there would drop the
-    schema's required `result` key, and this client rejects a structuredContent that fails
-    its outputSchema. Rather than model upstream's serializer — which a version bump can
-    change under us with no canary to notice — we write only what we can prove, and
-    otherwise leave the surface alone and say so on stderr. Failing closed costs the note;
-    guessing costs a client-side error on a response that was fine.
+def write_payload(msg, idx, payload, original_text, label):
+    """Write a mutated `payload` to BOTH surfaces of a tools/call result, or to NEITHER.
+
+    `content` is a serialization of the tool's return value; `structuredContent` is a
+    serialization of the return value POSSIBLY WRAPPED — FastMCP emits `{"result": …}` for
+    a tool whose outputSchema carries `x-fastmcp-wrap-result` (measured on the pinned
+    3.4.7; allowlisted `refresh_unity` is one). So we write only the two shapes we can
+    prove, against the payload as parsed from `original_text` before the caller mutated it:
+
+      * structuredContent mirrors it     -> both surfaces get `payload`
+      * structuredContent wraps it       -> content gets `payload`, structured `{"result": payload}`
+      * anything else                    -> NEITHER surface is written, loudly
+
+    Modelling upstream's serializer any further is what a version bump would silently
+    invalidate, and `canary.py` baselines `inputSchema` only, so nothing would catch it.
+
+    The all-or-nothing arm is the point. Writing `content` alone on an unprovable shape
+    would leave a manage_asset truth-correction saying `success:true` on one surface and
+    `success:false` on the other — precisely the contradiction this module exists to
+    prevent, and on the surface the client reads it would be the un-rewritten one. An
+    un-applied correction is the status quo; a half-applied one is a lie. (`add_note` is
+    the opposite case and keeps writing `content` regardless: a note that reaches one
+    surface is merely less visible, never contradictory.)
 
     Replaces rather than merges, deliberately: manage_asset pops `error`/`code` into
-    `upstream_*` on a success rewrite, and a merge would leave the originals behind —
-    reintroducing the very disagreement this function exists to prevent.
+    `upstream_*` on a success rewrite, and a merge would leave the originals behind.
     """
-    msg["result"]["content"][idx]["text"] = json.dumps(payload)
-    structured = _structured(msg)
-    if structured is None:
+    result = msg.get("result")
+    if not isinstance(result, dict):
         return msg
-    if structured == json.loads(original_text):
-        msg["result"]["structuredContent"] = payload
+    if "structuredContent" not in result:
+        # The one baseline tool with no outputSchema (manage_camera) has a single surface;
+        # there is nothing to disagree with, so content is written and no key is invented.
+        result["content"][idx]["text"] = json.dumps(payload)
+        return msg
+
+    structured = _canonical(result["structuredContent"])
+    pre = json.loads(original_text)
+    if structured == _canonical(pre):
+        result["content"][idx]["text"] = json.dumps(payload)
+        result["structuredContent"] = payload
+    elif structured == _canonical({"result": pre}):
+        result["content"][idx]["text"] = json.dumps(payload)
+        result["structuredContent"] = {"result": payload}
     else:
-        print("[vrc-mcp-proxy] structuredContent does not match the content payload "
-              "(a wrapped or reshaped result); left it untouched rather than write a "
-              "shape we cannot verify. The proxy's note reached `content` only.",
-              file=sys.stderr, flush=True)
+        print(f"[vrc-mcp-proxy] {label}: structuredContent is neither a mirror nor a "
+              f"`result`-wrapper of the content payload, so this response was left "
+              f"entirely alone — writing `content` by itself would have put a rewritten "
+              f"verdict on one surface and the original on the other, and the client "
+              f"reads the other. Upstream's response shape may have changed; see "
+              f"docs/design.md §Two surfaces.", file=sys.stderr, flush=True)
     return msg
 
 
@@ -137,4 +166,10 @@ def add_note(msg, text):
         existing = structured.get(TRANSPORT_NOTE_KEY)
         structured[TRANSPORT_NOTE_KEY] = (
             f"{existing}\n{text}" if isinstance(existing, str) and existing else text)
+    elif "structuredContent" in (msg.get("result") or {}):
+        # Present but not a dict: there IS a second surface and we could not annotate it.
+        # Absent is the ordinary single-surface case and stays quiet.
+        print("[vrc-mcp-proxy] structuredContent is not an object, so this note reached "
+              "`content` only — the surface the client reads has no note on it.",
+              file=sys.stderr, flush=True)
     return msg

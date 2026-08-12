@@ -6,9 +6,11 @@ from vrc_mcp_proxy.transforms import timeouts
 def _result_msg(text):
     # The shape that needs this note: a tool which SWALLOWS the transport timeout into a
     # success-shaped dict (manage_gameobject, manage_scene, manage_editor,
-    # find_gameobjects). A tool that lets it raise returns isError with no
-    # structuredContent, and its note has always reached the client through content.
-    return make_result(payload={"success": False, "error": text}, is_error=True)
+    # find_gameobjects) — so no isError, and structuredContent present. A tool that lets
+    # the timeout raise returns isError with NO structuredContent, which is the separate
+    # fixture in test_note_reaches_content_only_when_there_is_no_structured_content; its
+    # note has always reached the client through content.
+    return make_result(payload={"success": False, "error": text})
 
 
 def test_marker_in_result_appends_note_block():
@@ -55,7 +57,7 @@ def test_two_notes_on_one_response_concatenate():
     from vrc_mcp_proxy.transforms import manage_gameobject as mg
     miss = ("Timeout receiving Unity response; Target GameObject ('x') not found using "
             "method 'by_name'.")
-    msg = make_result(payload={"success": False, "error": miss}, is_error=True)
+    msg = make_result(payload={"success": False, "error": miss})  # a swallowing tool
     out = timeouts.annotate(mg.annotate(msg, {"action": "delete"}))
     assert len(out["result"]["content"]) == 3  # payload + one block per note
     note = structured_of(out)[TRANSPORT_NOTE_KEY]

@@ -5,11 +5,14 @@ from vrc_mcp_proxy.transforms import manage_gameobject as mg
 MISS = "Target GameObject(s) ('Manuka_underwear_bra') not found using method 'by_path'."
 
 
-def _result(text, is_error=True):
-    # Shaped like the bridge's: a JSON payload carrying the miss string, mirrored into
-    # structuredContent. manage_gameobject swallows a lookup miss into a success-shaped
-    # dict rather than raising, so its results DO carry structuredContent.
-    return make_result(payload={"success": not is_error, "error": text}, is_error=is_error)
+def _result(text, success=False):
+    """Shaped like the bridge's: a JSON payload carrying the miss string, mirrored into
+    structuredContent. manage_gameobject SWALLOWS a lookup miss into a success-shaped dict
+    rather than raising, so `isError` is absent and structuredContent is present — the
+    combination `isError:true` WITH structuredContent, which the old fixture built, is a
+    shape upstream never sends."""
+    key = "message" if success else "error"
+    return make_result(payload={"success": success, key: text})
 
 
 def _texts(msg):
@@ -43,7 +46,7 @@ def test_create_is_not_annotated():
 
 
 def test_success_is_not_annotated():
-    msg = mg.annotate(_result("GameObject 'Bra' deleted successfully.", is_error=False),
+    msg = mg.annotate(_result("GameObject 'Bra' deleted successfully.", success=True),
                       {"action": "delete"})
     assert len(_texts(msg)) == 1
 

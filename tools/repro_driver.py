@@ -20,6 +20,7 @@ import time
 
 sys.path.insert(0, "src")
 from vrc_mcp_proxy import config  # noqa: E402
+from vrc_mcp_proxy.envelope import TRANSPORT_NOTE_KEY  # noqa: E402
 
 results = []
 
@@ -38,6 +39,9 @@ class MCPClient:
             text=True, encoding="utf-8", bufsize=1)
         self.q = queue.Queue()
         self.next_id = 1
+        # Filled from tools/list below; read by call_tool to tell "no structuredContent
+        # because this tool declares no outputSchema" from "…and it should have one".
+        self.output_schema_tools = set()
         threading.Thread(target=self._reader, daemon=True).start()
 
     def _reader(self):
@@ -93,14 +97,31 @@ class MCPClient:
         structured = res.get("structuredContent")
         # The two surfaces of one result must agree. They disagreed silently for the life
         # of the proxy — four response transforms wrote `content` alone while every client
-        # reads `structuredContent` — and this driver has returned both halves all along
-        # without ever comparing them. A bump that reshapes either half (e.g. gives a tool
-        # x-fastmcp-wrap-result) surfaces here instead of in a live session.
-        if isinstance(structured, dict) and isinstance(parsed, dict) and structured != parsed:
-            record("surface-disagreement", "CHECK",
-                   f"{name}: content payload != structuredContent; "
-                   f"content-only keys={sorted(set(parsed) - set(structured))}, "
-                   f"structured-only keys={sorted(set(structured) - set(parsed))}")
+        # reads `structuredContent` — and this driver returned both halves all along
+        # without ever comparing them. A bump that reshapes either half surfaces here
+        # instead of in a live session.
+        if isinstance(structured, dict) and isinstance(parsed, dict):
+            # add_note deliberately writes its key into structuredContent only (the note is
+            # its own content BLOCK, never part of the payload block this parses), and the
+            # wrapped form is a legitimate shape — flagging either would fire on the
+            # proxy's own correct output, on every annotated response this driver provokes.
+            compare = {k: v for k, v in structured.items() if k != TRANSPORT_NOTE_KEY}
+            if compare != parsed and compare != {"result": parsed}:
+                shared = sorted(k for k in set(parsed) & set(compare)
+                                if parsed[k] != compare[k])
+                record("surface-disagreement", "CHECK",
+                       f"{name}: content payload != structuredContent; "
+                       f"differing values={ {k: (parsed[k], compare[k]) for k in shared} }, "
+                       f"content-only keys={sorted(set(parsed) - set(compare))}, "
+                       f"structured-only keys={sorted(set(compare) - set(parsed))}")
+        elif structured is None and not res.get("isError") \
+                and name in self.output_schema_tools:
+            # A tool that declares an outputSchema and returns no structuredContent is the
+            # shape this client hard-errors on ("has an output schema but did not return
+            # structured content"), so its absence is a finding, not a quiet pass.
+            record("missing-structured-content", "CHECK",
+                   f"{name}: declares an outputSchema but the result carries no "
+                   f"structuredContent")
         return {"isError": res.get("isError", False), "payload": parsed,
                 "raw_texts": texts, "structured": structured}
 
@@ -128,7 +149,9 @@ def main():
 
     tl = c.request("tools/list", {}, timeout=60)
     tools = tl.get("result", {}).get("tools", [])
-    record("tools-list", "OK", f"{len(tools)} tools")
+    c.output_schema_tools = {t["name"] for t in tools if t.get("outputSchema")}
+    record("tools-list", "OK",
+           f"{len(tools)} tools, {len(c.output_schema_tools)} with an outputSchema")
 
     r = c.call_tool("set_active_instance", {"instance": args.instance}, timeout=60)
     payload = r.get("payload") if isinstance(r.get("payload"), dict) else {}
