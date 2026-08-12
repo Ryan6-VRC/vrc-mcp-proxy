@@ -33,6 +33,12 @@ BEHAVIORS = (
     "manage_scene_arg_guard",
     "manage_camera_screenshot_output",
     "execute_code_venue_guard",
+    # Two keys, not one: the trap notes answer to upstream COMPILER prose, the offset note
+    # to a residual of this proxy's OWN injected prelude. Different causes, different
+    # staleness, different ledger rows — and coupling two behaviors under one switch is
+    # what F7 forbids (transforms/execute_code.py records it for the venue/idempotency pair).
+    "execute_code_compile_notes",
+    "execute_code_prelude_offset_note",
 )
 
 

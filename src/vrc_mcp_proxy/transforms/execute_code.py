@@ -1,15 +1,25 @@
-"""execute_code request transforms (action == "execute" only).
+"""execute_code transforms (action == "execute" only).
 
-Three behaviors, all request-side:
+Request-side:
   * using-refusal: top-level `using` directives can't live in a method body; refuse loud.
   * idempotency guard: wrap EVERY snippet so an upstream transport re-send (which
     re-executes — reproduced on 10.1.0) returns the cached result instead of running twice.
     Unconditional by design: a snippet the guard skips is a snippet that runs N times.
   * safety-checks off: send `safety_checks:false` so the bridge's blocked-pattern list stops
     firing. Rationale in the comment block below.
+  * venue guard: assert this Editor is the pinned one before anything mutates.
+
+Response-side (both advisory notes, neither rewrites a payload — see the block above
+`_ERROR_LINE`):
+  * compile notes: name the fix for two compile traps lifted out of `docs/unity.md`.
+  * prelude offset note: disclose that the reported line numbers count the lines the
+    request side injected, and how to read the two bands that are not the caller's at all.
 """
+import json
 import re
 import uuid
+
+from ..envelope import add_note, first_text_payload
 
 # Why the proxy disables a gate rather than scoping it (the queue's original ask was to
 # path-scope it, which is not reachable from here: `safety_checks` is one per-call boolean,
@@ -103,6 +113,18 @@ def wrap_idempotent(code, guid=None):
     client-side encoding slip would land inside a diagnostic.
     """
     guid = f"vrcproxy:{uuid.uuid4()}" if guid is None else guid
+    return _wrap_preamble(guid) + code + "\n" + _WRAP_TRAILER
+
+
+def _wrap_preamble(guid):
+    """Everything the wrap emits AHEAD of the caller's code, ending in a newline.
+
+    Split out from the trailer for one reason: every line here shifts the line numbers the
+    compiler reports, and `prelude_line_count` measures that shift off THIS string rather
+    than asserting a constant beside it. A constant would be a second copy of a fact only
+    this function owns, and its drift would be silent — a wrong line number in a diagnostic
+    reads exactly like a right one.
+    """
     return (
         f'var __a10k = "{guid}";\n'
         'var __a10prev = UnityEditor.SessionState.GetString(__a10k, "");\n'
@@ -117,14 +139,40 @@ def wrap_idempotent(code, guid=None):
         '+ (__a10prev == "completed(null)" ? "null" : __a10prev.Substring(11)));\n'
         'UnityEditor.SessionState.SetString(__a10k, "running");\n'
         'object __a10r;\n'
-        'try { __a10r = ((System.Func<object>)(() => {\n' + code + '\n'
-        'return null; }))(); }\n'
-        'catch (System.Exception __a10e) { UnityEditor.SessionState.SetString(__a10k, '
-        '"failed: " + __a10e.Message); throw; }\n'
-        'UnityEditor.SessionState.SetString(__a10k, __a10r == null ? "completed(null)" : '
-        '"completed: " + __a10r.ToString());\n'
-        'return __a10r;'
+        'try { __a10r = ((System.Func<object>)(() => {\n'
     )
+
+
+# The lines emitted AFTER the caller's code. Named only so the preamble could be named;
+# nothing measures this one — an error reported past the caller's last line is the caller's
+# to recognize, and `PRELUDE_NOTE_TEXT` tells them how (they know their own line count;
+# the proxy does not, because `_remember` stores the post-transform arguments).
+_WRAP_TRAILER = (
+    'return null; }))(); }\n'
+    'catch (System.Exception __a10e) { UnityEditor.SessionState.SetString(__a10k, '
+    '"failed: " + __a10e.Message); throw; }\n'
+    'UnityEditor.SessionState.SetString(__a10k, __a10r == null ? "completed(null)" : '
+    '"completed: " + __a10r.ToString());\n'
+    'return __a10r;'
+)
+
+
+def prelude_line_count(cfg, assets_path):
+    """How many lines the request transform injects ahead of the caller's code.
+
+    Measured off the generated strings, never derived from `cfg` alone — and that
+    distinction is load-bearing, not fastidiousness. `execute_code_venue_guard` can be
+    ENABLED while `venue_guard()` returns "": an unresolved venue with no selector, or an
+    empty heartbeat directory (proxy.py refuses only when the directory is non-empty). The
+    prelude is then 6, not 11, with the behavior reading "on". Every unit test in
+    test_execute_code.py sits in exactly that state, so a cfg-derived count would pass the
+    whole suite green and be off by five against a real Editor.
+    """
+    guard = venue_guard(assets_path) if cfg.get("execute_code_venue_guard", True) else ""
+    count = guard.count("\n")
+    if cfg.get("execute_code_idempotency_guard", True):
+        count += _wrap_preamble("probe").count("\n")
+    return count
 
 
 VENUE_MISROUTE_MARKER = "[proxy-venue-misroute]"
@@ -224,6 +272,170 @@ def misroute_text(payload):
     if isinstance(value, str) and value.startswith(VENUE_MISROUTE_MARKER):
         return value
     return None
+
+
+# --- response side: compile-failure notes --------------------------------
+#
+# Two behaviors, both advisory, both keyed to a compile failure and neither ever rewriting
+# a verdict or a payload. They replace two `docs/unity.md` §Sharp edges bullets (bare
+# `Object.DestroyImmediate`, static-class aliasing) under tool-design.md §Lifting's ratchet.
+#
+# On keying at all: manage_asset.py's "NO string matching" rule and design.md's "first
+# content-keyed response transform" carve-out both concern transforms that REWRITE. These
+# only append. That is the same standing manage_gameobject's lookup-miss note already
+# holds — "a stale key only costs the note; the note never rewrites a verdict" — and the
+# whole reason the line-number half of this work ships as a note about the offset rather
+# than as a rewrite of it: a stale key there would emit a wrong line number as fact.
+#
+# The keys are COMPILER prose, not the bridge's or the pinned server's, so they move on
+# Unity/Roslyn/mcs cadence — which no canary and no step of the bump runbook watches.
+# Stated rather than papered over: staleness here is unmonitored, and costless.
+#
+# Roslyn and CodeDom spell the same two diagnostics incompatibly (quoting, operand order,
+# wording), and CodeDom is a live door — 129 explicit `compiler:"codedom"` calls across 8
+# sessions, against 4,411 executes in 175 (session-store census, 2026-08-12). Matching one
+# dialect would leave the behavior dead on the other while the prose that covered both is
+# already deleted.
+
+# The structural gate: a compile error line is `Line <n>: <message>`. Keying the GATE on
+# this shape rather than on upstream's "Compilation failed" prose keeps the string-matching
+# surface to the two trap fragments below — everything else here is structure.
+_ERROR_LINE = re.compile(r"^Line (\d+):")
+
+# Shared by both dialects: roslyn `'X' is an ambiguous reference between 'A' and 'B'`,
+# codedom `` `X' is an ambiguous reference between `B' and `A' `` (operands reversed).
+_AMBIGUOUS = "is an ambiguous reference"
+
+# A type name in value position. Roslyn's phrasing, then CodeDom's. Deliberately NOT
+# narrowed to "the caller aliased a static class": both messages fire on ANY type used
+# where a value belongs, and asserting the cause would be inferring a purpose from a state
+# — what tool-design.md §Lifting's second condition forbids. The note names the condition
+# and offers the alias as the common cause, which is all the evidence supports.
+# CodeDom's arm keeps `is a \`type'` rather than stopping at the suffix: mcs templates the
+# whole CS0118 family off one string, varying the middle token over `namespace', `method
+# group', `property'. Keyed on the suffix alone, `var x = System;` would earn a note whose
+# first clause ("a type name was used") is simply false — and the invariant this note rests
+# on is that it asserts a STATE it can see.
+_TYPE_IN_VALUE_POSITION = ("is a type, which is not valid in the given context",
+                           "is a `type' but a `variable' was expected")
+
+AMBIGUITY_NOTE_TEXT = (
+    "[vrc-mcp-proxy] that ambiguity is execute_code's own: it pre-imports six namespaces "
+    "together, so a name two of them both define resolves to neither. The error above "
+    "names the pair — fully-qualify the one you meant (UnityEngine.Object.DestroyImmediate, "
+    "UnityEngine.Random.Range). Object and Random are the two that bite in practice."
+)
+
+TYPE_IN_VALUE_POSITION_NOTE_TEXT = (
+    "[vrc-mcp-proxy] that error means a type name was used where a value belongs. The "
+    "usual cause here is aliasing a static class — `var AD = AssetDatabase;` — which C# "
+    "does not allow: write the class name at each call site instead. This is ordinary C# "
+    "rather than an execute_code limitation, so it reads the same in a .cs file."
+)
+
+# `{n}` alone would misdescribe two live configurations, so the guards are named
+# generically and the trailer clause is conditional: at n=6 the venue guard emitted
+# nothing (the enabled-but-unresolved state), and at n=5 the idempotency guard did — so
+# there is no wrapper, and nothing past the caller's last line to warn about.
+PRELUDE_NOTE_TEXT = (
+    "[vrc-mcp-proxy] those line numbers are NOT your snippet's. This proxy injects {n} "
+    "lines ahead of your code (its request-side guards), so subtract {n}: reported line "
+    "{example} is your line 1. A line at or below {n} is inside that injected preamble "
+    "rather than your code.{trailer} You know your own line count; the proxy does not."
+)
+
+_TRAILER_CLAUSE = (
+    " So is anything past your own last line + {n}, which sits in the trailer closing the "
+    "idempotency wrapper. An error in either band almost always means your snippet's "
+    "braces, parens, or a block comment are unbalanced, which broke the wrapper around it."
+)
+
+
+def _compile_error_lines(payload):
+    """The `Line n: …` error strings from a compile-failure payload, else [].
+
+    Structural, not prose-keyed: `success:false` plus a `data.errors` list holding at least
+    one entry in the compiler's `Line <n>:` shape. Every element is coerced with `str()`
+    because a transform that raises would kill the child→client pump thread — proxy.py's
+    `pump_child` has no try/except, and the F52 watchdog arms only on execute_code/execute,
+    so every later call on that connection would hang with nothing to bound it.
+    """
+    if not isinstance(payload, dict) or payload.get("success") is not False:
+        return []
+    data = payload.get("data")
+    if not isinstance(data, dict) or not isinstance(data.get("errors"), list):
+        return []
+    return [str(e) for e in data["errors"] if _ERROR_LINE.match(str(e))]
+
+
+def compile_notes(errors):
+    """The trap notes earned by a list of compile-error strings, in a stable order.
+
+    One note per distinct trap, never per matching line: one mistake yields two errors on
+    both compilers (roslyn adds "cannot be accessed with an instance reference", codedom
+    adds its own consequence line), and two identical notes would read as two problems.
+    """
+    notes = []
+    if any(_AMBIGUOUS in e for e in errors):
+        notes.append(AMBIGUITY_NOTE_TEXT)
+    if any(frag in e for e in errors for frag in _TYPE_IN_VALUE_POSITION):
+        notes.append(TYPE_IN_VALUE_POSITION_NOTE_TEXT)
+    return notes
+
+
+def prelude_note(errors, prelude_lines, wrapped=True):
+    """The line-offset note, or None when there is no offset to disclose.
+
+    Fires on any compile failure, not only a trap-matched one — the offset distorts every
+    compile error equally. Silent when the count is 0: both guards disabled, or a `replay`,
+    where the stored snippet carries the ORIGINAL call's prelude and this process no longer
+    knows how big it was. Guessing there would put a wrong number in a diagnostic, which is
+    the whole reason this behavior discloses rather than corrects.
+    """
+    if not errors or not prelude_lines:
+        return None
+    trailer = _TRAILER_CLAUSE.format(n=prelude_lines) if wrapped else ""
+    return PRELUDE_NOTE_TEXT.format(
+        n=prelude_lines, example=prelude_lines + 1, trailer=trailer)
+
+
+# `replay` re-runs a stored history entry, and a compile failure IS recorded in history
+# (live-confirmed: `success:false`, `resultPreview:"Compilation failed"`). It is in fact the
+# class that genuinely recompiles — a stored entry that once SUCCEEDED short-circuits on the
+# idempotency guard's baked-in SessionState key and never reaches the compiler, while a
+# failed one never wrote that key. So replay is precisely where these traps re-fire, and
+# gating the notes on `execute` alone would leave the door the prose used to cover.
+_ANNOTATED_ACTIONS = frozenset({"execute", "replay"})
+
+
+def annotate(msg, arguments, cfg, prelude_lines=0):
+    """Append compile-failure notes to an execute_code response. Never rewrites anything.
+
+    Ordering note for callers: this only ever calls `add_note`, so it must run AFTER any
+    `write_payload` on the same response. `add_note` mutates `structuredContent` without
+    touching `content[0]["text"]`, which makes `write_payload`'s mirror proof fail on the
+    next call — it would then decline, loudly but ineffectively, and the payload rewrite
+    would silently not happen. No such rewrite exists on this path today; the constraint is
+    recorded because it is invisible at the call site.
+    """
+    if not isinstance(arguments, dict) or arguments.get("action") not in _ANNOTATED_ACTIONS:
+        return msg
+    text, _idx = first_text_payload(msg)
+    if text is None:
+        return msg
+    try:
+        errors = _compile_error_lines(json.loads(text))
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return msg
+    notes = compile_notes(errors) if cfg.get("execute_code_compile_notes", True) else []
+    if cfg.get("execute_code_prelude_offset_note", True):
+        offset = prelude_note(errors, prelude_lines,
+                              wrapped=cfg.get("execute_code_idempotency_guard", True))
+        if offset:
+            notes.append(offset)
+    for note in notes:
+        add_note(msg, note)
+    return msg
 
 
 def transform_request(arguments, cfg, guid=None, assets_path=None):

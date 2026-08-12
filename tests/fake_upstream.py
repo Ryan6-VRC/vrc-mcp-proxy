@@ -64,6 +64,17 @@ def main():
                 withheld.append(make_result(
                     rid, payload={"tool": name, "ok": True, "real": True}, is_error=False))
                 continue
+            if isinstance(args, dict) and args.get("compile_fail"):
+                # The one upstream shape the compile-note transforms key on. Verbatim from
+                # a live Editor, so the e2e path is exercised against a real response body
+                # rather than one shaped to match the matcher.
+                respond(make_result(rid, payload={
+                    "success": False, "message": "Compilation failed",
+                    "data": {"errors": [
+                        "Line 12: 'Object' is an ambiguous reference between "
+                        "'UnityEngine.Object' and 'object'"],
+                        "compiler": "roslyn"}}, is_error=False))
+                continue
             if isinstance(args, dict) and args.get("delay_s"):
                 resp = make_result(
                     rid, payload={"tool": name, "ok": True, "real": True}, is_error=False)

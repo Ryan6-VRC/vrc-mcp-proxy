@@ -177,6 +177,7 @@ class Proxy:
                 return
 
         venue = None  # set only on the execute_code path; read by _remember below
+        prelude_lines = 0  # ditto: lines injected ahead of the caller's code
         if name == "execute_code":
             # Resolve the pinned venue for the guard. Same two knobs the server routes on,
             # read at request time so a later set_active_instance can't retarget this call.
@@ -214,6 +215,16 @@ class Proxy:
                 self._write_client(tool_error_result(req_id, payload))
                 return
             arguments = payload
+            # How many lines we just injected ahead of the caller's code, for the
+            # response-side offset note. Computed HERE, from the same `venue` the guard was
+            # built from: `execute_code_venue_guard` can be ENABLED while the guard string
+            # is empty (unresolved venue with no selector, or an empty heartbeat directory —
+            # the refusal above fires only when the directory is non-empty), leaving a
+            # prelude of 6 rather than 11 with the behavior reading "on". Re-deriving it
+            # from cfg on the response side would be wrong in exactly that configuration,
+            # and green in every unit test, which all sit in it.
+            if isinstance(payload, dict) and payload.get("action") == "execute":
+                prelude_lines = execute_code.prelude_line_count(self.cfg, venue)
         elif name == "manage_scene" and self.cfg.get("manage_scene_arg_guard", True):
             refusal = manage_scene.refusal_for(arguments)
             if refusal is not None:
@@ -239,7 +250,7 @@ class Proxy:
         self._remember(req_id, "tools/call", name, arguments,
                        active_snapshot=self.active_instance,
                        requested_instance=requested_instance,
-                       venue_guarded=bool(venue))
+                       venue_guarded=bool(venue), prelude_lines=prelude_lines)
         # F52 watchdog: arm ONLY on execute_code/execute (the exact gate execute_code.py:88
         # transforms on). Armed before forwarding so pending+timer are set before the child
         # can respond; a fast response cancels it in _take.
@@ -352,13 +363,31 @@ class Proxy:
         if self.cfg.get("manage_gameobject_inactive_note", True) and \
                 name == "manage_gameobject":
             msg = manage_gameobject.annotate(msg, args)
+        # Compile-failure notes. Placed after every payload-writing transform above and
+        # before timeouts.annotate purely as house order — this one only ever calls
+        # add_note, and add_note breaks a LATER write_payload's mirror proof (it mutates
+        # structuredContent without touching content[0]["text"]), so notes go last. Both
+        # behaviors are read inside `annotate`, which is why there is no cfg gate here:
+        # they are two switches over one response and gating the call would couple them.
+        if name == "execute_code":
+            msg = execute_code.annotate(
+                msg, args, self.cfg,
+                # `.get` with a default, not `[...]`: every non-execute_code caller of
+                # _remember omits the key, and 0 is the right silent answer for them —
+                # nothing was injected, so there is no offset to disclose. (Not, as an
+                # earlier draft of this comment claimed, the watchdog's tombstone: that
+                # path returns on `was_timed_out` before reaching here, and carries a null
+                # `tool` besides. A comment asserting a hazard that isn't live is the same
+                # stale-premise class the paired atelier PR is fixing in unity.md.)
+                prelude_lines=info.get("prelude_lines") or 0)
         if self.cfg.get("timeout_notes", True):
             msg = timeouts.annotate(msg)
         return msg
 
     # --- pending-request bookkeeping --------------------------------------
     def _remember(self, req_id, method, tool, args,
-                  active_snapshot=None, requested_instance=None, venue_guarded=False):
+                  active_snapshot=None, requested_instance=None, venue_guarded=False,
+                  prelude_lines=0):
         stale_timer = None
         with self._pending_lock:
             if req_id in self.pending:
@@ -388,7 +417,8 @@ class Proxy:
             self.pending[req_id] = {"method": method, "tool": tool, "args": args,
                                     "active": active_snapshot,
                                     "requested_instance": requested_instance,
-                                    "venue_guarded": venue_guarded}
+                                    "venue_guarded": venue_guarded,
+                                    "prelude_lines": prelude_lines}
         # Cancel OUTSIDE the lock — _pending_lock is never held across other blocking work.
         if stale_timer is not None:
             stale_timer.cancel()

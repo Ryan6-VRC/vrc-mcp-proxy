@@ -1,3 +1,6 @@
+import json
+
+from helpers import make_result
 from vrc_mcp_proxy.transforms import execute_code as ec
 
 CFG = {"execute_code_using_refusal": True, "execute_code_idempotency_guard": True}
@@ -318,3 +321,221 @@ def test_misroute_text_ignores_history_payload():
         {"codePreview": 'return "' + ec.VENUE_MISROUTE_MARKER + ' ...";',
          "resultPreview": ec.VENUE_MISROUTE_MARKER + " this call was pinned to X"}]}}
     assert ec.misroute_text(payload) is None
+
+
+# --- response half: compile-failure notes ----------------------------------
+#
+# Every error string below is a VERBATIM capture from a live Editor (Sandbox@c8adad95,
+# 2026-08-12), not a paraphrase. That matters more here than usual: the two dialects
+# disagree about quoting, operand order and wording, so a hand-typed fixture would agree
+# with whichever one the author had in mind while the other went unmatched in production.
+
+NOTES_CFG = {"execute_code_compile_notes": True,
+             "execute_code_prelude_offset_note": True}
+EXEC = {"action": "execute", "code": "irrelevant"}
+
+# roslyn, from `Object.DestroyImmediate(go);`
+ROSLYN_AMBIGUOUS = ["Line 13: 'Object' is an ambiguous reference between "
+                    "'UnityEngine.Object' and 'object'"]
+# codedom, same snippet: operands REVERSED, backtick-apostrophe quoting, plus the
+# consequence line that one mistake also produces.
+CODEDOM_AMBIGUOUS = ["Line 13: `Object' is an ambiguous reference between `object' and "
+                     "`UnityEngine.Object'",
+                     "Line 13: `object' does not contain a definition for "
+                     "`DestroyImmediate'"]
+# roslyn, from `var AD = AssetDatabase;`
+ROSLYN_TYPE_IN_VALUE = ["Line 12: 'AssetDatabase' is a type, which is not valid in the "
+                        "given context",
+                        "Line 13: Member 'AssetDatabase.GetAllAssetPaths()' cannot be "
+                        "accessed with an instance reference; qualify it with a type "
+                        "name instead"]
+# codedom, THE SAME two-line snippet: wholly different wording, and fully qualified.
+# Line 12 on both compilers, which is what makes the offset a single number — an earlier
+# capture here read `Line 14` and was quietly from a different (3-line) probe, making the
+# dialects look 2 lines apart and the note's "subtract 11" look wrong on this door.
+CODEDOM_TYPE_IN_VALUE = ["Line 12: `UnityEditor.AssetDatabase' is a `type' but a "
+                         "`variable' was expected",
+                         "Line 12: Expression denotes a `type', where a `variable', "
+                         "`value' or `method group' was expected"]
+# roslyn — a THIRD live instance of the ambiguity trap that no doc line ever named.
+ROSLYN_RANDOM = ["Line 12: 'Random' is an ambiguous reference between "
+                 "'UnityEngine.Random' and 'System.Random'"]
+
+
+def _fail(errors, compiler="roslyn"):
+    return {"success": False, "message": "Compilation failed",
+            "data": {"errors": errors, "compiler": compiler}}
+
+
+def _notes(msg):
+    """Proxy notes on the surface the CLIENT reads, not the one tests used to read."""
+    return msg["result"]["structuredContent"].get("proxy_transport_note", "")
+
+
+def test_ambiguity_note_fires_on_both_dialects():
+    for errors in (ROSLYN_AMBIGUOUS, CODEDOM_AMBIGUOUS, ROSLYN_RANDOM):
+        assert ec.compile_notes(errors) == [ec.AMBIGUITY_NOTE_TEXT], errors
+
+
+def test_type_in_value_position_note_fires_on_both_dialects():
+    for errors in (ROSLYN_TYPE_IN_VALUE, CODEDOM_TYPE_IN_VALUE):
+        assert ec.compile_notes(errors) == [ec.TYPE_IN_VALUE_POSITION_NOTE_TEXT], errors
+
+
+def test_one_note_per_trap_not_per_matching_line():
+    # Both codedom fixtures carry TWO error lines for ONE mistake; two identical notes
+    # would read as two problems.
+    assert len(ec.compile_notes(CODEDOM_TYPE_IN_VALUE)) == 1
+    assert len(ec.compile_notes(CODEDOM_AMBIGUOUS)) == 1
+    assert len(ec.compile_notes(ROSLYN_AMBIGUOUS + ROSLYN_TYPE_IN_VALUE)) == 2
+
+
+def test_type_note_states_the_condition_and_does_not_assert_the_cause():
+    # Both keys fire on ANY type in value position, not only an alias, so the note names
+    # the condition and offers the alias as a cause. Asserting the cause would infer a
+    # purpose from a state — tool-design.md Lifting's second condition forbids it.
+    text = ec.TYPE_IN_VALUE_POSITION_NOTE_TEXT
+    assert "usual cause" in text
+    assert "ordinary C#" in text  # and NOT an execute_code limitation
+
+
+def test_unrelated_compile_error_earns_no_trap_note():
+    assert ec.compile_notes(
+        ["Line 12: The name 'Foo' does not exist in the current context"]) == []
+
+
+def test_annotate_writes_both_surfaces():
+    msg = make_result(payload=_fail(ROSLYN_AMBIGUOUS))
+    ec.annotate(msg, EXEC, NOTES_CFG, prelude_lines=11)
+    # structuredContent is the surface an MCP client shows the model; asserting on
+    # `content` alone reproduces the blindness docs/design.md Two surfaces records.
+    assert ec.AMBIGUITY_NOTE_TEXT in _notes(msg)
+    assert any(ec.AMBIGUITY_NOTE_TEXT == b.get("text") for b in msg["result"]["content"])
+
+
+def test_annotate_never_rewrites_the_payload():
+    original = _fail(ROSLYN_AMBIGUOUS)
+    msg = make_result(payload=json.loads(json.dumps(original)))
+    ec.annotate(msg, EXEC, NOTES_CFG, prelude_lines=11)
+    body = json.loads(msg["result"]["content"][0]["text"])
+    assert body == original  # line numbers included: this discloses, it never edits
+
+
+def test_annotate_skips_success_and_non_annotated_actions():
+    ok = make_result(payload={"success": True, "data": {"result": "fine"}})
+    assert _notes(ec.annotate(ok, EXEC, NOTES_CFG, prelude_lines=11)) == ""
+    hist = make_result(payload=_fail(ROSLYN_AMBIGUOUS))
+    ec.annotate(hist, {"action": "get_history"}, NOTES_CFG, prelude_lines=11)
+    assert _notes(hist) == ""
+
+
+def test_replay_earns_the_trap_note_but_never_the_offset_note():
+    # `replay` re-runs a STORED history entry, and a compile failure is recorded in history
+    # (live-confirmed). It is the class that genuinely recompiles: a stored entry that once
+    # succeeded short-circuits on the idempotency guard's baked-in key, while a failed one
+    # never wrote that key. So the traps re-fire here and the note must too.
+    msg = make_result(payload=_fail(ROSLYN_AMBIGUOUS))
+    ec.annotate(msg, {"action": "replay", "index": 0}, NOTES_CFG, prelude_lines=0)
+    assert ec.AMBIGUITY_NOTE_TEXT in _notes(msg)
+    # The offset stays silent: the stored snippet carries the ORIGINAL call's prelude, whose
+    # size this process no longer knows. Guessing would put a wrong number in a diagnostic.
+    assert "subtract" not in _notes(msg)
+
+
+def test_type_key_does_not_fire_on_the_rest_of_the_mcs_CS0118_family():
+    # mcs templates the whole family off one string, varying the middle token. Keyed on the
+    # suffix alone, `var x = System;` would earn a note whose opening claim is false.
+    assert ec.compile_notes(
+        ["Line 12: `System' is a `namespace' but a `variable' was expected"]) == []
+    assert ec.compile_notes(
+        ["Line 12: `Foo.Bar()' is a `method group' but a `variable' was expected"]) == []
+    # The real capture still matches.
+    assert ec.compile_notes(CODEDOM_TYPE_IN_VALUE) == [ec.TYPE_IN_VALUE_POSITION_NOTE_TEXT]
+
+
+def test_offset_note_omits_the_trailer_clause_when_nothing_wrapped_the_snippet():
+    # At prelude 5 the idempotency guard emitted nothing, so there IS no trailer past the
+    # caller's last line and warning about one would describe a configuration we are not in.
+    wrapped = ec.prelude_note(ROSLYN_AMBIGUOUS, 11, wrapped=True)
+    bare = ec.prelude_note(ROSLYN_AMBIGUOUS, 5, wrapped=False)
+    assert "trailer" in wrapped and "past your own last line" in wrapped
+    assert "trailer" not in bare and "past your own last line" not in bare
+    assert "subtract 5" in bare
+    # The guards are named generically: at 6 the VENUE guard emitted nothing, at 5 the
+    # idempotency one did, so naming both unconditionally would be wrong either way.
+    assert "venue and idempotency" not in ec.prelude_note(ROSLYN_AMBIGUOUS, 6)
+
+
+def test_each_behavior_is_independently_disableable():
+    only_offset = make_result(payload=_fail(ROSLYN_AMBIGUOUS))
+    ec.annotate(only_offset, EXEC, {"execute_code_compile_notes": False},
+                prelude_lines=11)
+    assert ec.AMBIGUITY_NOTE_TEXT not in _notes(only_offset)
+    assert "subtract 11" in _notes(only_offset)
+
+    only_trap = make_result(payload=_fail(ROSLYN_AMBIGUOUS))
+    ec.annotate(only_trap, EXEC, {"execute_code_prelude_offset_note": False},
+                prelude_lines=11)
+    assert ec.AMBIGUITY_NOTE_TEXT in _notes(only_trap)
+    assert "subtract 11" not in _notes(only_trap)
+
+
+def test_offset_note_states_the_bands_and_stays_silent_at_zero():
+    note = ec.prelude_note(ROSLYN_AMBIGUOUS, 11)
+    assert "subtract 11" in note and "reported line 12 is your line 1" in note
+    assert ec.prelude_note(ROSLYN_AMBIGUOUS, 0) is None  # both guards off: nothing to fix
+    assert ec.prelude_note([], 11) is None
+
+
+def test_offset_note_fires_on_any_compile_failure_not_only_matched_traps():
+    msg = make_result(payload=_fail(["Line 12: The name 'Foo' does not exist"]))
+    ec.annotate(msg, EXEC, NOTES_CFG, prelude_lines=11)
+    assert "subtract 11" in _notes(msg)  # the offset distorts every compile error equally
+
+
+def test_malformed_error_payloads_never_raise():
+    # A raise here kills proxy.pump_child's thread (it has no try/except), hanging every
+    # later call on the connection — the F52 watchdog arms only on execute_code/execute.
+    for payload in ({"success": False, "data": {"errors": [{"line": 13}, None, 7]}},
+                    {"success": False, "data": {"errors": "not-a-list"}},
+                    {"success": False, "data": None},
+                    {"success": False},
+                    {"result": "not a compile failure at all"}):
+        ec.annotate(make_result(payload=payload), EXEC, NOTES_CFG, prelude_lines=11)
+    ec.annotate(make_result(text="not json at all"), EXEC, NOTES_CFG, prelude_lines=None)
+
+
+# --- the drift guard -------------------------------------------------------
+def test_prelude_line_count_matches_what_transform_request_actually_injects():
+    """The count is MEASURED off the emitted strings, never asserted beside them.
+
+    A constant would be a second copy of a fact `_wrap_preamble` and `venue_guard` own,
+    and its drift would be silent: a wrong line number in a diagnostic reads exactly like
+    a right one. This test is the ratchet — change either generator's line count without
+    changing the other and it goes red.
+
+    All four configurations, because the live one is not the default-tested one: the venue
+    guard can be ENABLED with an unresolved venue, which is the state every other test in
+    this file sits in (prelude 6), while a real pinned call is 11.
+    """
+    marker = "//__caller_first_line__"
+    for venue_on in (True, False):
+        for idem_on in (True, False):
+            cfg = {"execute_code_venue_guard": venue_on,
+                   "execute_code_idempotency_guard": idem_on}
+            assets = "C:/proj/One/Assets" if venue_on else None
+            _action, payload = ec.transform_request(
+                {"action": "execute", "code": marker + "\nreturn 1;"}, cfg,
+                guid="vrcproxy:fixed", assets_path=assets)
+            emitted = payload["code"].split("\n").index(marker)
+            assert emitted == ec.prelude_line_count(cfg, assets), (venue_on, idem_on)
+
+
+def test_prelude_count_zero_off_eleven_pinned_six_unresolved():
+    off = {"execute_code_venue_guard": False, "execute_code_idempotency_guard": False}
+    assert ec.prelude_line_count(off, None) == 0
+    on = {"execute_code_venue_guard": True, "execute_code_idempotency_guard": True}
+    # 11 is the offset measured live against a real pinned Editor (caller line 5 -> 16).
+    assert ec.prelude_line_count(on, "C:/proj/One/Assets") == 11
+    # Enabled-but-unresolved: the configuration a cfg-derived count would get wrong.
+    assert ec.prelude_line_count(on, None) == 6
