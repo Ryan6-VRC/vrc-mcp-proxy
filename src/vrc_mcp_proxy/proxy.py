@@ -372,10 +372,13 @@ class Proxy:
         if name == "execute_code":
             msg = execute_code.annotate(
                 msg, args, self.cfg,
-                # `.get` with a default, not `[...]`: the watchdog's tombstone entry
-                # (_watchdog_fire) carries neither key, and a None here would raise inside
-                # a transform on the child->client pump thread — which has no try/except,
-                # so it would take the connection down for every later call.
+                # `.get` with a default, not `[...]`: every non-execute_code caller of
+                # _remember omits the key, and 0 is the right silent answer for them —
+                # nothing was injected, so there is no offset to disclose. (Not, as an
+                # earlier draft of this comment claimed, the watchdog's tombstone: that
+                # path returns on `was_timed_out` before reaching here, and carries a null
+                # `tool` besides. A comment asserting a hazard that isn't live is the same
+                # stale-premise class the paired atelier PR is fixing in unity.md.)
                 prelude_lines=info.get("prelude_lines") or 0)
         if self.cfg.get("timeout_notes", True):
             msg = timeouts.annotate(msg)

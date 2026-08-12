@@ -349,10 +349,13 @@ ROSLYN_TYPE_IN_VALUE = ["Line 12: 'AssetDatabase' is a type, which is not valid 
                         "Line 13: Member 'AssetDatabase.GetAllAssetPaths()' cannot be "
                         "accessed with an instance reference; qualify it with a type "
                         "name instead"]
-# codedom, same snippet: wholly different wording, and fully qualified.
-CODEDOM_TYPE_IN_VALUE = ["Line 14: `UnityEditor.AssetDatabase' is a `type' but a "
+# codedom, THE SAME two-line snippet: wholly different wording, and fully qualified.
+# Line 12 on both compilers, which is what makes the offset a single number — an earlier
+# capture here read `Line 14` and was quietly from a different (3-line) probe, making the
+# dialects look 2 lines apart and the note's "subtract 11" look wrong on this door.
+CODEDOM_TYPE_IN_VALUE = ["Line 12: `UnityEditor.AssetDatabase' is a `type' but a "
                          "`variable' was expected",
-                         "Line 14: Expression denotes a `type', where a `variable', "
+                         "Line 12: Expression denotes a `type', where a `variable', "
                          "`value' or `method group' was expected"]
 # roslyn — a THIRD live instance of the ambiguity trap that no doc line ever named.
 ROSLYN_RANDOM = ["Line 12: 'Random' is an ambiguous reference between "
@@ -418,12 +421,49 @@ def test_annotate_never_rewrites_the_payload():
     assert body == original  # line numbers included: this discloses, it never edits
 
 
-def test_annotate_skips_success_and_non_execute_actions():
+def test_annotate_skips_success_and_non_annotated_actions():
     ok = make_result(payload={"success": True, "data": {"result": "fine"}})
     assert _notes(ec.annotate(ok, EXEC, NOTES_CFG, prelude_lines=11)) == ""
     hist = make_result(payload=_fail(ROSLYN_AMBIGUOUS))
     ec.annotate(hist, {"action": "get_history"}, NOTES_CFG, prelude_lines=11)
     assert _notes(hist) == ""
+
+
+def test_replay_earns_the_trap_note_but_never_the_offset_note():
+    # `replay` re-runs a STORED history entry, and a compile failure is recorded in history
+    # (live-confirmed). It is the class that genuinely recompiles: a stored entry that once
+    # succeeded short-circuits on the idempotency guard's baked-in key, while a failed one
+    # never wrote that key. So the traps re-fire here and the note must too.
+    msg = make_result(payload=_fail(ROSLYN_AMBIGUOUS))
+    ec.annotate(msg, {"action": "replay", "index": 0}, NOTES_CFG, prelude_lines=0)
+    assert ec.AMBIGUITY_NOTE_TEXT in _notes(msg)
+    # The offset stays silent: the stored snippet carries the ORIGINAL call's prelude, whose
+    # size this process no longer knows. Guessing would put a wrong number in a diagnostic.
+    assert "subtract" not in _notes(msg)
+
+
+def test_type_key_does_not_fire_on_the_rest_of_the_mcs_CS0118_family():
+    # mcs templates the whole family off one string, varying the middle token. Keyed on the
+    # suffix alone, `var x = System;` would earn a note whose opening claim is false.
+    assert ec.compile_notes(
+        ["Line 12: `System' is a `namespace' but a `variable' was expected"]) == []
+    assert ec.compile_notes(
+        ["Line 12: `Foo.Bar()' is a `method group' but a `variable' was expected"]) == []
+    # The real capture still matches.
+    assert ec.compile_notes(CODEDOM_TYPE_IN_VALUE) == [ec.TYPE_IN_VALUE_POSITION_NOTE_TEXT]
+
+
+def test_offset_note_omits_the_trailer_clause_when_nothing_wrapped_the_snippet():
+    # At prelude 5 the idempotency guard emitted nothing, so there IS no trailer past the
+    # caller's last line and warning about one would describe a configuration we are not in.
+    wrapped = ec.prelude_note(ROSLYN_AMBIGUOUS, 11, wrapped=True)
+    bare = ec.prelude_note(ROSLYN_AMBIGUOUS, 5, wrapped=False)
+    assert "trailer" in wrapped and "past your own last line" in wrapped
+    assert "trailer" not in bare and "past your own last line" not in bare
+    assert "subtract 5" in bare
+    # The guards are named generically: at 6 the VENUE guard emitted nothing, at 5 the
+    # idempotency one did, so naming both unconditionally would be wrong either way.
+    assert "venue and idempotency" not in ec.prelude_note(ROSLYN_AMBIGUOUS, 6)
 
 
 def test_each_behavior_is_independently_disableable():

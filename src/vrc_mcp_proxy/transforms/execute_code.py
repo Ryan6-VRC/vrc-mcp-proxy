@@ -311,14 +311,19 @@ _AMBIGUOUS = "is an ambiguous reference"
 # where a value belongs, and asserting the cause would be inferring a purpose from a state
 # — what tool-design.md §Lifting's second condition forbids. The note names the condition
 # and offers the alias as the common cause, which is all the evidence supports.
+# CodeDom's arm keeps `is a \`type'` rather than stopping at the suffix: mcs templates the
+# whole CS0118 family off one string, varying the middle token over `namespace', `method
+# group', `property'. Keyed on the suffix alone, `var x = System;` would earn a note whose
+# first clause ("a type name was used") is simply false — and the invariant this note rests
+# on is that it asserts a STATE it can see.
 _TYPE_IN_VALUE_POSITION = ("is a type, which is not valid in the given context",
-                           "but a `variable' was expected")
+                           "is a `type' but a `variable' was expected")
 
 AMBIGUITY_NOTE_TEXT = (
-    "[vrc-mcp-proxy] that ambiguity is execute_code's own: it pre-imports System and "
-    "UnityEngine together, so a name both namespaces define resolves to neither. "
-    "Fully-qualify the one you meant — UnityEngine.Object.DestroyImmediate, "
-    "UnityEngine.Random.Range. Object and Random are the two that bite in practice."
+    "[vrc-mcp-proxy] that ambiguity is execute_code's own: it pre-imports six namespaces "
+    "together, so a name two of them both define resolves to neither. The error above "
+    "names the pair — fully-qualify the one you meant (UnityEngine.Object.DestroyImmediate, "
+    "UnityEngine.Random.Range). Object and Random are the two that bite in practice."
 )
 
 TYPE_IN_VALUE_POSITION_NOTE_TEXT = (
@@ -328,14 +333,21 @@ TYPE_IN_VALUE_POSITION_NOTE_TEXT = (
     "rather than an execute_code limitation, so it reads the same in a .cs file."
 )
 
+# `{n}` alone would misdescribe two live configurations, so the guards are named
+# generically and the trailer clause is conditional: at n=6 the venue guard emitted
+# nothing (the enabled-but-unresolved state), and at n=5 the idempotency guard did — so
+# there is no wrapper, and nothing past the caller's last line to warn about.
 PRELUDE_NOTE_TEXT = (
     "[vrc-mcp-proxy] those line numbers are NOT your snippet's. This proxy injects {n} "
-    "lines ahead of your code (the venue and idempotency guards), so subtract {n}: "
-    "reported line {example} is your line 1. Two bands are not yours at all — a line at "
-    "or below {n} is inside the injected preamble, and anything past your own last line "
-    "+ {n} is inside the trailer that closes the wrapper. An error in either band almost "
-    "always means your snippet's braces, parens, or a block comment are unbalanced, which "
-    "broke the wrapper around it. You know your own line count; the proxy does not."
+    "lines ahead of your code (its request-side guards), so subtract {n}: reported line "
+    "{example} is your line 1. A line at or below {n} is inside that injected preamble "
+    "rather than your code.{trailer} You know your own line count; the proxy does not."
+)
+
+_TRAILER_CLAUSE = (
+    " So is anything past your own last line + {n}, which sits in the trailer closing the "
+    "idempotency wrapper. An error in either band almost always means your snippet's "
+    "braces, parens, or a block comment are unbalanced, which broke the wrapper around it."
 )
 
 
@@ -371,16 +383,29 @@ def compile_notes(errors):
     return notes
 
 
-def prelude_note(errors, prelude_lines):
+def prelude_note(errors, prelude_lines, wrapped=True):
     """The line-offset note, or None when there is no offset to disclose.
 
     Fires on any compile failure, not only a trap-matched one — the offset distorts every
-    compile error equally. Silent when the count is 0 (both guards disabled): there is
-    then nothing to correct for, and a note saying "subtract 0" is noise.
+    compile error equally. Silent when the count is 0: both guards disabled, or a `replay`,
+    where the stored snippet carries the ORIGINAL call's prelude and this process no longer
+    knows how big it was. Guessing there would put a wrong number in a diagnostic, which is
+    the whole reason this behavior discloses rather than corrects.
     """
     if not errors or not prelude_lines:
         return None
-    return PRELUDE_NOTE_TEXT.format(n=prelude_lines, example=prelude_lines + 1)
+    trailer = _TRAILER_CLAUSE.format(n=prelude_lines) if wrapped else ""
+    return PRELUDE_NOTE_TEXT.format(
+        n=prelude_lines, example=prelude_lines + 1, trailer=trailer)
+
+
+# `replay` re-runs a stored history entry, and a compile failure IS recorded in history
+# (live-confirmed: `success:false`, `resultPreview:"Compilation failed"`). It is in fact the
+# class that genuinely recompiles — a stored entry that once SUCCEEDED short-circuits on the
+# idempotency guard's baked-in SessionState key and never reaches the compiler, while a
+# failed one never wrote that key. So replay is precisely where these traps re-fire, and
+# gating the notes on `execute` alone would leave the door the prose used to cover.
+_ANNOTATED_ACTIONS = frozenset({"execute", "replay"})
 
 
 def annotate(msg, arguments, cfg, prelude_lines=0):
@@ -393,7 +418,7 @@ def annotate(msg, arguments, cfg, prelude_lines=0):
     would silently not happen. No such rewrite exists on this path today; the constraint is
     recorded because it is invisible at the call site.
     """
-    if not isinstance(arguments, dict) or arguments.get("action") != "execute":
+    if not isinstance(arguments, dict) or arguments.get("action") not in _ANNOTATED_ACTIONS:
         return msg
     text, _idx = first_text_payload(msg)
     if text is None:
@@ -404,7 +429,8 @@ def annotate(msg, arguments, cfg, prelude_lines=0):
         return msg
     notes = compile_notes(errors) if cfg.get("execute_code_compile_notes", True) else []
     if cfg.get("execute_code_prelude_offset_note", True):
-        offset = prelude_note(errors, prelude_lines)
+        offset = prelude_note(errors, prelude_lines,
+                              wrapped=cfg.get("execute_code_idempotency_guard", True))
         if offset:
             notes.append(offset)
     for note in notes:

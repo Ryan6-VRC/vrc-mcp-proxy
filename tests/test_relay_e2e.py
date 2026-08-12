@@ -170,6 +170,40 @@ def test_allowed_tool_call_relays_through():
         child.terminate()
 
 
+def test_compile_notes_reach_the_client_with_a_request_side_prelude_count():
+    """The plumbing guard: proves `prelude_lines` travelled request -> response.
+
+    The pure functions are pinned by unit tests, but delete `prelude_lines=prelude_lines`
+    from proxy.py's `_remember` call and every one of them stays green while the offset
+    note silently vanishes from every real response — the same class of blindness
+    docs/design.md Two surfaces records four shipped instances of.
+
+    The asserted number is **6, not 11**: no heartbeat resolves in-suite, so the venue
+    guard is enabled-but-empty and contributes nothing. A 6 can only have come from the
+    request side measuring what it actually emitted; an 11 would mean a constant, and a 0
+    would mean the value never made the trip.
+    """
+    proxy, child, sink = _proxy({"execute_code_idempotency_guard": True,
+                                 "execute_code_venue_guard": True,
+                                 "execute_code_compile_notes": True,
+                                 "execute_code_prelude_offset_note": True})
+    try:
+        proxy.handle_client_line(json.dumps(
+            {"jsonrpc": "2.0", "id": 71, "method": "tools/call",
+             "params": {"name": "execute_code",
+                        "arguments": {"action": "execute", "code": "return 1;",
+                                      "compile_fail": True}}}))
+        resp = sink.wait_for_id(71)
+        note = resp["result"]["structuredContent"]["proxy_transport_note"]
+        assert "subtract 6" in note, note
+        assert "ambiguity is execute_code's own" in note
+        # The payload itself is untouched — this behavior discloses, it never rewrites.
+        body = json.loads(resp["result"]["content"][0]["text"])
+        assert body["data"]["errors"][0].startswith("Line 12:")
+    finally:
+        child.terminate()
+
+
 def test_execute_watchdog_synthesizes_timeout_and_drops_late_response():
     # An execute_code/execute call whose upstream response is withheld past the threshold
     # gets a synthesized codedom-routing timeout; the late real response is then DROPPED.
