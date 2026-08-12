@@ -36,6 +36,14 @@ One of those strings is **not** the pinned server's: `transforms/manage_gameobje
    - Check whether upstream's `read_console` has stopped truncating entries to their first line.
      If it ever does, the denial in `allowlist.py::_REDIRECTS` is the thing to reconsider — until
      then a bump changes nothing about it.
+   - `execute_code`'s compile-trap fragments (`_AMBIGUOUS`, `_TYPE_IN_VALUE_POSITION`) are the
+     one set this step **cannot** cover, and saying so is the point: they are *compiler* prose
+     (Roslyn and mcs), so they move with the Unity version rather than with this pin. A bump
+     re-validates nothing about them, and a Unity upgrade is not a bump. Their staleness is
+     therefore unmonitored by design — a missed match drops a note and changes no verdict. If
+     you do want them checked, the cheap probe is the verbatim fixtures in
+     `tests/test_execute_code.py` re-run against a live Editor on both `compiler` values; they
+     are captures, not paraphrases, so a diff is the whole signal.
    - `manage_gameobject.LOOKUP_MISS_MARKER` — re-read the bridge's `Editor/Tools/GameObjects/`
      handlers: confirm the lookup-miss text still matches, and that the note's claim still
      holds (which actions pass `searchInactive`, and that `by_id` is still matched against
