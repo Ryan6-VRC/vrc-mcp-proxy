@@ -382,6 +382,46 @@ def test_manage_scene_guard_disabled_forwards_the_ignored_argument():
     assert _forwarded_arguments(p)["target"] == "Chocolat"
 
 
+def test_manage_asset_move_is_refused_at_the_relay():
+    cfg = _all_off()
+    cfg["manage_asset_mutation_guard"] = True
+    p = _proxy(cfg)
+
+    p.handle_client_line(_call_request(
+        1, "manage_asset", {"action": "move", "path": "Assets/a.mat",
+                            "destination": "Assets/b/a.mat"}))
+
+    # The whole point of a refusal over a transform: the call must not reach upstream,
+    # because upstream performing the move is what produces the unreadable verdict.
+    assert p.child.stdin.getvalue() == ""
+    [line] = p.client_out.lines
+    msg = json.loads(line)
+    assert msg["result"]["isError"] is True
+    assert "AssetDatabase.MoveAsset(" in msg["result"]["content"][0]["text"]
+
+
+def test_manage_asset_delete_still_reaches_upstream():
+    # The guard is per-action. Denying the tool outright would take delete, search and
+    # get_info with it; upstream reports all three honestly.
+    cfg = _all_off()
+    cfg["manage_asset_mutation_guard"] = True
+    p = _proxy(cfg)
+
+    p.handle_client_line(_call_request(
+        1, "manage_asset", {"action": "delete", "path": "Assets/a.mat"}))
+
+    assert _forwarded_arguments(p)["action"] == "delete"
+    assert p.client_out.lines == []
+
+
+def test_manage_asset_guard_disabled_forwards_the_move():
+    p = _proxy(_all_off())
+    p.handle_client_line(_call_request(
+        1, "manage_asset", {"action": "move", "path": "Assets/a.mat",
+                            "destination": "Assets/b/a.mat"}))
+    assert _forwarded_arguments(p)["action"] == "move"
+
+
 def test_manage_camera_screenshot_gains_the_scratch_output_folder():
     cfg = _all_off()
     cfg["manage_camera_screenshot_output"] = True

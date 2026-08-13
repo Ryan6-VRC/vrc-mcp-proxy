@@ -4,9 +4,8 @@ upstream MCP-for-Unity server, with the interception points wired in.
 Everything passes through untouched except:
   * tools/list responses  -> canary-validate + allowlist-filter
   * tools/call requests    -> allowlist / canary-drift refusal, execute_code transforms,
-                              instance-target tracking
-  * tools/call responses   -> manage_asset truth-correction, manage_gameobject
-                              inactive-target note, timeout note
+                              manage_asset mutation guard, instance-target tracking
+  * tools/call responses   -> manage_gameobject inactive-target note, timeout note
 
 Notifications, resources, prompts, initialize: pure passthrough. Child stderr -> our
 stderr. Child dies -> we exit nonzero, loudly.
@@ -230,6 +229,11 @@ class Proxy:
             if refusal is not None:
                 self._write_client(tool_error_result(req_id, refusal))
                 return
+        elif name == "manage_asset" and self.cfg.get("manage_asset_mutation_guard", True):
+            refusal = manage_asset.refusal_for(arguments)
+            if refusal is not None:
+                self._write_client(tool_error_result(req_id, refusal))
+                return
         elif name == "manage_camera" and \
                 self.cfg.get("manage_camera_screenshot_output", True):
             arguments = manage_camera.transform_request(arguments)
@@ -355,11 +359,6 @@ class Proxy:
                     refusal = None
                 if refusal is not None:
                     return tool_error_result(msg["id"], refusal)
-        if self.cfg.get("manage_asset_truth_correction", True) and name == "manage_asset":
-            if manage_asset.is_move_call(args):
-                msg = manage_asset.correct_response(msg, args, info.get("active"))
-            elif manage_asset.is_delete_call(args):
-                msg = manage_asset.correct_delete_response(msg, args, info.get("active"))
         if self.cfg.get("manage_gameobject_inactive_note", True) and \
                 name == "manage_gameobject":
             msg = manage_gameobject.annotate(msg, args)

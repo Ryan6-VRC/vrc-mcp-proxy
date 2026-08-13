@@ -67,10 +67,10 @@ def first_text_payload(msg):
     return None, None
 
 
-# The note key `add_note` writes into structuredContent. Deliberately NOT `proxy_note`,
-# which manage_asset's truth-correction owns inside its own payload: one response can be
-# both truth-corrected and note-annotated, and two behaviors sharing one key would make
-# the later one clobber or concatenate onto the earlier one's verdict.
+# The note key `add_note` writes into structuredContent. Deliberately its own key rather
+# than one a payload-writing transform would also reach for: one response can be both
+# rewritten and note-annotated, and two behaviors sharing a key would make the later one
+# clobber or concatenate onto the earlier one's verdict.
 TRANSPORT_NOTE_KEY = "proxy_transport_note"
 
 
@@ -112,15 +112,18 @@ def write_payload(msg, idx, payload, original_text, label):
     invalidate, and `canary.py` baselines `inputSchema` only, so nothing would catch it.
 
     The all-or-nothing arm is the point. Writing `content` alone on an unprovable shape
-    would leave a manage_asset truth-correction saying `success:true` on one surface and
-    `success:false` on the other — precisely the contradiction this module exists to
-    prevent, and on the surface the client reads it would be the un-rewritten one. An
-    un-applied correction is the status quo; a half-applied one is a lie. (`add_note` is
-    the opposite case and keeps writing `content` regardless: a note that reaches one
-    surface is merely less visible, never contradictory.)
+    would leave a rewrite saying `success:true` on one surface and `success:false` on the
+    other — precisely the contradiction this module exists to prevent, and the surface the
+    client reads would be the un-rewritten one. An un-applied correction is the status quo;
+    a half-applied one is a lie. (`add_note` is the opposite case and keeps writing
+    `content` regardless: a note that reaches one surface is merely less visible, never
+    contradictory.)
 
-    Replaces rather than merges, deliberately: manage_asset pops `error`/`code` into
-    `upstream_*` on a success rewrite, and a merge would leave the originals behind.
+    Replaces rather than merges, deliberately. A verdict rewrite that retires keys — moving
+    an `error`/`code` pair aside so a `success:true` payload carries no live failure keys —
+    is only correct if the write is a replacement; a merge would leave the originals behind
+    on the structured surface. No current caller rewrites a verdict (`proxy_project_root`
+    adds a key), so this arm is here for the next one.
     """
     result = msg.get("result")
     if not isinstance(result, dict):

@@ -17,13 +17,13 @@ BUMP_RUNBOOK = "docs/bump-runbook.md"
 ALLOWLIST_SOURCE = "src/vrc_mcp_proxy/allowlist.py"
 
 # --- behaviors, each independently disableable ---------------------------
-# Disable one or more at launch: VRC_MCP_PROXY_DISABLE="manage_asset_truth_correction,canary"
+# Disable one or more at launch: VRC_MCP_PROXY_DISABLE="manage_asset_mutation_guard,canary"
 BEHAVIORS = (
     "canary",
     "allowlist",
     "execute_code_using_refusal",
     "execute_code_idempotency_guard",
-    "manage_asset_truth_correction",
+    "manage_asset_mutation_guard",
     "timeout_notes",
     "execute_code_watchdog",
     "instance_guard",

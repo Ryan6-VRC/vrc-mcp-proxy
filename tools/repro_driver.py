@@ -201,9 +201,14 @@ def main():
     for i in range(3):
         src, dst = f"Assets/A10Repro/mat{i}.mat", f"Assets/A10Repro/Dest/mat{i}.mat"
         r = c.call_tool("manage_asset", {"action": "move", "path": src, "destination": dst}, timeout=90)
-        ok_reported = not (r.get("_rpc_error") or r.get("isError"))
+        # The lie is a SUCCESS-shaped result carrying `success:false` in its payload, not an
+        # isError result — keying on isError reports NOT-REPRODUCED while the lie is firing
+        # on every call, which is what this check used to do.
+        payload = r.get("payload")
+        ok_reported = (isinstance(payload, dict) and payload.get("success") is True
+                       and not r.get("_rpc_error") and not r.get("isError"))
         on_disk = os.path.exists(os.path.join(proj, dst))
-        f22.append((ok_reported, on_disk, json.dumps(r.get("_rpc_error") or r.get("payload"))[:150]))
+        f22.append((ok_reported, on_disk, json.dumps(r.get("_rpc_error") or payload)[:150]))
     lies = [x for x in f22 if x[1] and not x[0]]
     record("F22-move-lies", "REPRODUCED" if lies else "NOT-REPRODUCED(idle)",
            "; ".join(f"reported_ok={a} disk={b} {d}" for a, b, d in f22))
