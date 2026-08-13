@@ -43,18 +43,35 @@ def _parse_heartbeat(value):
 
 
 def read_heartbeats(directory=None):
-    """List of {hash, port, assets_path, project_root, project_name, last_heartbeat} for live Editors."""
+    """List of {hash, port, assets_path, project_root, project_name, last_heartbeat} for live Editors.
+
+    One unreadable status file is skipped, never raised on — this function runs on BOTH
+    relay paths (the `instance_guard` count on every tools/call, and `canonical_instance` +
+    `resolve_project_root` on the relay thread), so a raise here is a whole-session outage,
+    which is the same F3 class `_parse_heartbeat` above closes at its own value. Measured
+    escapes from the narrower `(OSError, json.JSONDecodeError)` this catch replaces: a
+    non-UTF-8 byte in the file raises `UnicodeDecodeError` (a `ValueError`, NOT a
+    `JSONDecodeError`), JSON whose top level is a list or a string reaches `data.get` and
+    raises `AttributeError`, and a non-string `project_path` reaches `os.path.dirname` and
+    raises `TypeError` — the field reads are dict accesses, the path arithmetic is not. A
+    merely truncated file was already caught.
+    """
     directory = DEFAULT_DIR if directory is None else directory
     out = []
     for path in glob.glob(os.path.join(directory, "unity-mcp-status-*.json")):
         try:
             with open(path, encoding="utf-8") as f:
                 data = json.load(f)
-        except (OSError, json.JSONDecodeError):
+        except (OSError, ValueError):
             continue
+        if not isinstance(data, dict):
+            continue  # valid JSON, wrong shape: every read below is a dict access
         base = os.path.basename(path)
         h = base[len("unity-mcp-status-"):-len(".json")]
-        assets = data.get("project_path", "")
+        assets = data.get("project_path") or ""
+        if not isinstance(assets, str):
+            continue  # `os.path.dirname` below is not a dict access: a numeric or list
+            # project_path raises TypeError, which the widened catch above does not cover.
         # project_path points at .../<root>/Assets; the root is its parent.
         root = os.path.dirname(assets) if assets else None
         out.append({
