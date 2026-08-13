@@ -380,25 +380,44 @@ def test_a_failing_refusal_write_is_not_answered_twice(harness, monkeypatch):
         f"the refusal was answered twice: {json.dumps(h.sink.for_id(7))[:400]}")
 
 
-def test_a_server_originated_request_is_never_answered_from_a_client_id(harness, monkeypatch):
-    """JSON-RPC ids are per-direction. A line with BOTH an id and a method is a server->client
-    request whose id indexes the server's space; treating it as a client id both fabricates a
-    reply and disarms whichever client call shares that number."""
+def test_a_client_response_to_a_server_request_is_never_answered(harness, monkeypatch):
+    """JSON-RPC ids are per-direction, and this is the reachable half.
+
+    A client line with an id and NO method is the client answering a server-originated request
+    (`roots/list`, `ping`, `sampling/*`), so its id indexes the SERVER's space. It reaches a
+    bare `_write_child` — which raises once the child's stdin is gone — and without the guard
+    the request arm would discard whichever client call shares that number, cancelling its F52
+    watchdog, and synthesize a reply the client never asked for."""
     h = harness(cfg_overrides={"execute_code_watchdog": True}, execute_timeout_s=30)
     h.proxy._remember(5, "tools/call", "execute_code", {"action": "execute"})
     h.proxy._arm_watchdog(5)
+    monkeypatch.setattr(h.proxy, "_write_child",
+                        lambda _msg: (_ for _ in ()).throw(OSError("child stdin is gone")))
 
-    def boom(_msg):
-        raise OSError("client pipe hiccup")
-
-    monkeypatch.setattr(h.proxy, "_write_client", boom)
-    # A server-originated request that happens to carry id 5 in the SERVER's id space.
-    h.proxy.serve_child_line(json.dumps(
-        {"jsonrpc": "2.0", "id": 5, "method": "roots/list", "params": {}}) + "\n")
+    h.proxy.serve_client_line(json.dumps({"jsonrpc": "2.0", "id": 5, "result": {"roots": []}}))
 
     assert 5 in h.proxy.pending, "an unrelated client call lost its pending entry"
     assert 5 in h.proxy._timers, "an unrelated client call had its F52 watchdog disarmed"
     assert h.sink.for_id(5) == [], "a reply was fabricated for a request the client never sent"
+
+
+def test_the_relay_net_ignores_a_server_originated_id(harness):
+    """The response-side half of the same rule, asserted directly.
+
+    Unreachable through the relay as it stands — every client-facing write is terminal, so a
+    failing passthrough of a server->client request is swallowed rather than contained. Kept
+    and pinned here because the guard's cost is one comparison and its absence would only
+    resurface as a disarmed watchdog on an unrelated call, which is not a failure the next
+    author would see."""
+    h = harness(cfg_overrides={"execute_code_watchdog": True}, execute_timeout_s=30)
+    h.proxy._remember(5, "tools/call", "execute_code", {"action": "execute"})
+    h.proxy._arm_watchdog(5)
+
+    h.proxy._on_relay_failure(OSError("x"), json.dumps(
+        {"jsonrpc": "2.0", "id": 5, "method": "roots/list", "params": {}}))
+
+    assert 5 in h.proxy.pending and 5 in h.proxy._timers
+    assert h.sink.for_id(5) == []
 
 
 def test_an_unreadable_upstream_stream_terminates_the_child(harness, monkeypatch):
