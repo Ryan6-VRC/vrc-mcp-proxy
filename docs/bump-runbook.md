@@ -25,7 +25,7 @@ One of those strings is **not** the pinned server's: `transforms/manage_gameobje
    ```
    uv run python tools/repro_driver.py --instance <Name@hash|hash|port> --project-root <that project's root>
    ```
-   Re-confirm each verdict: does G22 double-execute still reproduce (idempotency guard still earns its keep)? Does F22 still lie (the `move`/`rename` refusal still earned — an upstream that forwards `MoveAsset`'s return value honestly retires it)? If a failure family is fixed upstream, retire its behavior AND its ledger line in `docs/design.md`.
+   Re-confirm each verdict: does G22 double-execute still reproduce (idempotency guard still earns its keep)? Does F22 still lie — **both** halves, `F22-move-lies` and `F22b-bare-destination-relocates`, since verdict reporting and argument resolution are separate mechanisms and the `move`/`rename` refusal is earned by either one alone? If a failure family is fixed upstream, retire its behavior AND its ledger line in `docs/design.md`.
 
 5. **Re-validate the string-keyed transforms against upstream source.**
    - `TIMEOUT_MARKERS` — grep the upstream Python `send_command`/transport for the timeout

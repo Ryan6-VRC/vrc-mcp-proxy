@@ -42,9 +42,25 @@ BEHAVIORS = (
 )
 
 
-def load_config(env=None):
-    """Return {behavior: enabled_bool}. Unknown names in the disable list are ignored."""
+def load_config(env=None, log=None):
+    """Return {behavior: enabled_bool}.
+
+    An unknown name in the disable list is ignored but NOT silent: a behavior rename would
+    otherwise turn an operator's existing setting into a no-op that reads exactly like a
+    working one, re-enabling the behavior they meant to switch off. `log` takes the proxy's
+    stderr logger; without one the names are still returned to the caller.
+    """
     env = os.environ if env is None else env
     raw = env.get("VRC_MCP_PROXY_DISABLE", "")
     disabled = {tok.strip() for tok in raw.replace(",", " ").split() if tok.strip()}
+    unknown = sorted(disabled - set(BEHAVIORS))
+    if unknown and log is not None:
+        log(f"[vrc-mcp-proxy] VRC_MCP_PROXY_DISABLE names {len(unknown)} behavior(s) that "
+            f"do not exist and had no effect: {', '.join(unknown)}. Valid names are in "
+            f"BEHAVIORS ({config_source()}); a renamed behavior stays ENABLED until the "
+            f"variable is updated.")
     return {b: (b not in disabled) for b in BEHAVIORS}
+
+
+def config_source():
+    return "src/vrc_mcp_proxy/config.py"

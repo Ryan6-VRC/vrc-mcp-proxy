@@ -81,11 +81,14 @@ def _read_execute_timeout(env=None):
 class Proxy:
     def __init__(self, cfg=None, child=None, client_out=None, log=None,
                  execute_timeout_s=None):
-        self.cfg = cfg if cfg is not None else config.load_config()
         self.child = child
         self.client_out = client_out if client_out is not None else sys.stdout
         self.log = log if log is not None else (
             lambda m: print(m, file=sys.stderr, flush=True))
+        # Logger first: load_config warns through it about disable-list names that don't
+        # exist, which is how a renamed behavior announces that an operator's setting is
+        # now a no-op rather than silently re-enabling itself.
+        self.cfg = cfg if cfg is not None else config.load_config(log=self.log)
         # Load the canary baseline only when the canary is enabled: with it disabled
         # (VRC_MCP_PROXY_DISABLE=canary — the mid-bump repair path), a missing/corrupt
         # baseline must not crash startup.
@@ -341,8 +344,8 @@ class Proxy:
         # reintroduce silence at the last hop of a guard whose whole purpose is a silent
         # wrong-venue failure, so it is rewritten to an error. This is the proxy's only
         # content-keyed response transform: permitted because the key is a marker WE emitted
-        # two hops earlier, not upstream prose whose wording drifts between versions (which
-        # manage_asset.py's "NO string matching" rule is about). Scoped to action=="execute"
+        # two hops earlier, not upstream prose whose wording drifts between versions (the
+        # no-string-keying rule, design.md §Two standing rules). Scoped to action=="execute"
         # and anchored inside misroute_text — see its docstring for the get_history echo that
         # a looser match would misfire on.
         # Bound to a call we actually guarded (`venue_guarded`): a snippet that legitimately
