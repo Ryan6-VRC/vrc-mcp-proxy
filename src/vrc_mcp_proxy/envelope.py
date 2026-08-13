@@ -4,6 +4,14 @@ A synthesized refusal is an MCP tool *result* with isError=true (not a JSON-RPC
 `error` object): the text then reaches the model as readable content and can never be
 misread as a transport failure. The word "error result" in the design means this shape.
 
+That rule is about refusing a **tool call**, where a readable tool result exists to carry
+the text. It does not reach a failure on a request that has no tool result to put text in —
+a `tools/list` above all, whose `ListToolsResult` declares no `isError` field and no content
+channel to the model. There the only two shapes available are a JSON-RPC error and a tool
+surface the proxy could not vouch for, so `rpc_error` below is the sanctioned carrier for
+that case, and only that case: never reach for it as a lighter-weight alternative to
+`tool_error_result` on a tools/call.
+
 **A tools/call result has two surfaces, and a response transform writes both.** 46 of the
 47 baseline tools declare an `outputSchema`, so upstream returns `structuredContent`
 beside `content` — and that is the surface an MCP client shows the model. Every response
@@ -35,6 +43,20 @@ def tool_error_result(req_id, text):
         "jsonrpc": "2.0",
         "id": req_id,
         "result": {"content": [{"type": "text", "text": text}], "isError": True},
+    }
+
+
+def rpc_error(req_id, text, code=-32603):
+    """A JSON-RPC error object, for a failure on a request with no tool result to carry text.
+
+    See the module docstring for why this exists beside `tool_error_result` rather than
+    replacing a single case of it. `code` defaults to JSON-RPC's internal-error code, which
+    is what a proxy-side failure is: the request was well-formed and we could not serve it.
+    """
+    return {
+        "jsonrpc": "2.0",
+        "id": req_id,
+        "error": {"code": code, "message": text},
     }
 
 
