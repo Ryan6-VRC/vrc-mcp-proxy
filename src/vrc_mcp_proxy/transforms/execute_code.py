@@ -280,7 +280,7 @@ def misroute_text(payload):
 # a verdict or a payload. They replace two `docs/unity.md` §Sharp edges bullets (bare
 # `Object.DestroyImmediate`, static-class aliasing) under tool-design.md §Lifting's ratchet.
 #
-# On keying at all: design.md §Two standing rules' no-string-keying rule and its "first
+# On keying at all: design.md §Three standing rules' no-string-keying rule and its "first
 # content-keyed response transform" carve-out both concern transforms that REWRITE. These
 # only append. That is the same standing manage_gameobject's lookup-miss note already
 # holds — "a stale key only costs the note; the note never rewrites a verdict" — and the

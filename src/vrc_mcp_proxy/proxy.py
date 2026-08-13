@@ -94,7 +94,7 @@ def _read_execute_timeout(env=None):
 #               report a missing annotation.
 #   verdict  -> refuse (tool_error_result). The transform rewrites what the caller acts on,
 #               so forwarding the un-rewritten payload is the silence the correction exists
-#               to close (§Two standing rules; the F48 row's "a call nobody is checking").
+#               to close (§Three standing rules; the F48 row's "a call nobody is checking").
 #   listing  -> refuse (rpc_error). Same fail-loud policy as `verdict`; only the envelope
 #               differs, because a tools/list response has no tool result to carry text.
 #   request  -> refuse and never forward. A guard that raised leaves us unable to say
@@ -591,7 +591,7 @@ class Proxy:
         # wrong-venue failure, so it is rewritten to an error. This is the proxy's only
         # content-keyed response transform: permitted because the key is a marker WE emitted
         # two hops earlier, not upstream prose whose wording drifts between versions (the
-        # no-string-keying rule, design.md §Two standing rules). Scoped to action=="execute"
+        # no-string-keying rule, design.md §Three standing rules). Scoped to action=="execute"
         # and anchored inside misroute_text — see its docstring for the get_history echo that
         # a looser match would misfire on.
         # Bound to a call we actually guarded (`venue_guarded`): a snippet that legitimately
@@ -721,8 +721,12 @@ class Proxy:
                  f"{traceback.format_exc().rstrip()}")
         req_id = _id_and_method(line)[0]
         if req_id is not None:
-            # Idempotent: every region except the pre-_take net runs downstream of _take, so
-            # this is usually a no-op. It is not optional — see _discard_pending.
+            # A no-op for every region that exists TODAY: all of them raise downstream of
+            # `_take`, which has already popped pending and cancelled the timer. Kept because a
+            # region added ahead of `_take` would otherwise leave an armed watchdog to answer
+            # this id a second time, and that is not a failure the next author would see —
+            # pinned by test_contained_failure_arm_clears_pending_and_the_armed_timer, since
+            # nothing reaches it through the relay.
             self._discard_pending(req_id)
 
         if failure.kind == "advisory":

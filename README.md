@@ -8,6 +8,8 @@ Some lies are refused rather than corrected, because the truth never reaches thi
 
 It is a **thin line-based JSON-RPC relay**, not an MCP-SDK re-serve: it spawns the pinned server as a subprocess and passes every message through untouched except at named interception points. See [`docs/design.md`](docs/design.md) for the full rationale and the per-failure verdicts, and [`docs/bump-runbook.md`](docs/bump-runbook.md) for moving the upstream pin.
 
+Every interception point below runs inside a contained region, so one raising transform cannot take the relay down and leave the session mute. Containment is always on and has no `VRC_MCP_PROXY_DISABLE` name — it is not a behavior in the table's sense. `docs/design.md` §Three standing rules owns what a caller is told when a region fails, and which classes fail open rather than loud.
+
 ## Behaviors
 
 | Behavior | Point | What it does |

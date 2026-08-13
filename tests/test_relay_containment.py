@@ -308,6 +308,52 @@ def test_request_containment_after_arming_does_not_double_answer(harness, monkey
     assert h.proxy.pending == {} and h.proxy._timers == {}
 
 
+def test_contained_failure_arm_clears_pending_and_the_armed_timer(harness):
+    """The response arm's cleanup, tested directly.
+
+    Every region that exists today raises downstream of `_take`, which has already popped
+    `pending` and cancelled the timer — so the arm's own cleanup is unreachable through the
+    relay and a mutation removing it survives an end-to-end suite. It is kept because a region
+    added ahead of `_take` would otherwise leave an armed watchdog to answer a second time, so
+    the guarantee is pinned here rather than left to the next author's ordering."""
+    h = harness(cfg_overrides={"execute_code_watchdog": True}, execute_timeout_s=30)
+    h.proxy._remember(99, "tools/call", "execute_code", {"action": "execute"})
+    h.proxy._arm_watchdog(99)
+    assert 99 in h.proxy.pending and 99 in h.proxy._timers
+
+    h.proxy._on_contained_failure(
+        TransformFailure("synthetic region", "verdict", ValueError("x")),
+        json.dumps({"jsonrpc": "2.0", "id": 99, "result": {}}))
+
+    assert 99 not in h.proxy.pending and 99 not in h.proxy._timers
+    assert 99 not in h.proxy.timed_out
+    assert len(h.sink.for_id(99)) == 1
+
+
+def test_a_failing_terminal_write_is_not_answered_a_second_time(harness, monkeypatch):
+    """A raise INSIDE the terminal write may have already emitted the line, so the loud arm
+    must not fire behind it. This is the case that makes 'the write is the last statement, so
+    nothing can double-answer' false, and it needs the write itself to fail — which no fake
+    child can cause."""
+    h = harness(cfg_overrides={"timeout_notes": True})
+    state = {"armed": True}
+    real_flush = h.sink.flush
+
+    def flush_once_then_fail():
+        real_flush()
+        if state["armed"]:
+            state["armed"] = False
+            raise OSError("client pipe hiccup")
+
+    monkeypatch.setattr(h.sink, "flush", flush_once_then_fail)
+    h.call(1, "manage_gameobject", {"action": "find"})
+    time.sleep(0.5)
+
+    assert len(h.sink.for_id(1)) == 1, (
+        f"the response was answered twice: {json.dumps(h.sink.for_id(1))[:400]}")
+    assert "lost rather than replaced" in h.stderr_text()
+
+
 # --- the golden (region, kind) table ----------------------------------------
 # Every containment region in proxy.py, by the class it declares. This is the test the
 # label-registry idea became: a registry of labels cannot see a MISSING guard, and it cannot
