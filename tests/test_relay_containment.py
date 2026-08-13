@@ -163,6 +163,11 @@ def test_advisory_failure_in_the_pin_region_still_forwards(harness, monkeypatch)
     got = h.sink.wait_for_id(1)
     assert "error" not in got and got["result"].get("isError") is not True
     assert "advisory" in h.stderr_text()
+    # The classification's premise, asserted rather than assumed: upstream committed this pin
+    # before responding, so the proxy must hold it too. Left uncommitted, `resolve_assets_path`
+    # takes its freshness-filtered branch AND the venue guard's unresolved-pin refusal cannot
+    # fire (`selector` is falsy), so the next execute_code forwards with no guard emitted.
+    assert h.proxy.active_instance == "Sandbox@c8adad95"
 
 
 def test_relay_survives_and_serves_the_next_call(harness, monkeypatch):
@@ -352,6 +357,72 @@ def test_a_failing_terminal_write_is_not_answered_a_second_time(harness, monkeyp
     assert len(h.sink.for_id(1)) == 1, (
         f"the response was answered twice: {json.dumps(h.sink.for_id(1))[:400]}")
     assert "lost rather than replaced" in h.stderr_text()
+
+
+def test_a_failing_refusal_write_is_not_answered_twice(harness, monkeypatch):
+    """A request-side refusal is a write INSIDE the containment region, so a bare
+    `_write_client` there fails into `_on_request_failure` and answers the same id again. The
+    refusals are terminal writes even though they are not the last line of their method."""
+    h = harness(cfg_overrides={"allowlist": True})
+    state = {"armed": True}
+    real_flush = h.sink.flush
+
+    def flush_once_then_fail():
+        real_flush()
+        if state["armed"]:
+            state["armed"] = False
+            raise OSError("client pipe hiccup")
+
+    monkeypatch.setattr(h.sink, "flush", flush_once_then_fail)
+    h.call(7, "generate_image", {})  # not allowlisted -> refusal on the request path
+    time.sleep(0.4)
+    assert len(h.sink.for_id(7)) == 1, (
+        f"the refusal was answered twice: {json.dumps(h.sink.for_id(7))[:400]}")
+
+
+def test_a_server_originated_request_is_never_answered_from_a_client_id(harness, monkeypatch):
+    """JSON-RPC ids are per-direction. A line with BOTH an id and a method is a server->client
+    request whose id indexes the server's space; treating it as a client id both fabricates a
+    reply and disarms whichever client call shares that number."""
+    h = harness(cfg_overrides={"execute_code_watchdog": True}, execute_timeout_s=30)
+    h.proxy._remember(5, "tools/call", "execute_code", {"action": "execute"})
+    h.proxy._arm_watchdog(5)
+
+    def boom(_msg):
+        raise OSError("client pipe hiccup")
+
+    monkeypatch.setattr(h.proxy, "_write_client", boom)
+    # A server-originated request that happens to carry id 5 in the SERVER's id space.
+    h.proxy.serve_child_line(json.dumps(
+        {"jsonrpc": "2.0", "id": 5, "method": "roots/list", "params": {}}) + "\n")
+
+    assert 5 in h.proxy.pending, "an unrelated client call lost its pending entry"
+    assert 5 in h.proxy._timers, "an unrelated client call had its F52 watchdog disarmed"
+    assert h.sink.for_id(5) == [], "a reply was fabricated for a request the client never sent"
+
+
+def test_an_unreadable_upstream_stream_terminates_the_child(harness, monkeypatch):
+    """The loud-exit arm must not orphan a LIVE child: `os._exit` skips `main`'s
+    `finally: child.terminate()`, and an orphaned upstream server holds its Unity bridge
+    connection open."""
+    h = harness()
+    calls = {"terminated": False, "exit_code": None}
+    monkeypatch.setattr(h.proxy.child, "terminate",
+                        lambda: calls.__setitem__("terminated", True))
+    monkeypatch.setattr(os, "_exit", lambda code: calls.__setitem__("exit_code", code))
+
+    class Exploding:
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            raise UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte")
+
+    monkeypatch.setattr(h.proxy.child, "stdout", Exploding())
+    h.proxy.pump_child()
+
+    assert calls["terminated"] is True
+    assert calls["exit_code"] == 1
 
 
 # --- the golden (region, kind) table ----------------------------------------

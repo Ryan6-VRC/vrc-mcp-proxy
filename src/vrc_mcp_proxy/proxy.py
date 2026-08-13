@@ -202,13 +202,19 @@ class Proxy:
 
     # --- containment plumbing ---------------------------------------------
     def _write_terminal(self, msg):
-        """The last write on a response path: failures here are stderr-only, NEVER contained
-        into a synthesized answer.
+        """**Every** write that answers the client goes through here — a relayed response, a
+        passthrough, or a request-side refusal. Failures are stderr-only, NEVER contained into
+        a synthesized answer.
 
         `_write_client` may have already emitted the line before `flush` raised, so an
         id-correlated failure result from here could double-answer one request. Swallowing is
         the lesser evil: the client either got the response or is gone (a `BrokenPipeError`
-        resolves itself when the stdin loop hits EOF)."""
+        resolves itself when the stdin loop hits EOF).
+
+        Why this is not merely a response path's last statement: the request-side refusals sit
+        INSIDE `serve_client_line`'s containment region, so a bare write there fails into
+        `_on_request_failure`, which then answers the same id a second time. "Terminal" means
+        last-write-for-this-id, not last-line-in-the-method."""
         try:
             self._write_client(msg)
         except Exception as exc:  # noqa: BLE001 - terminal write; see docstring
@@ -274,9 +280,13 @@ class Proxy:
                  f"call was refused and NOT forwarded upstream.\n"
                  f"{traceback.format_exc().rstrip()}")
         req_id, method = _id_and_method(line)
-        if req_id is None:
-            # A notification or an unparseable line: nothing to answer. The raw-forward path
-            # is why the "it already parsed once" argument does not hold here.
+        if req_id is None or method is None:
+            # No id: a notification, or an unparseable line (the raw-forward path is why the
+            # "it already parsed once" argument does not hold here). No method: this is the
+            # client's RESPONSE to a server-originated request, so the id belongs to the
+            # server's id space — answering it would fabricate a reply to a request the client
+            # never made, and `_discard_pending` would pop an unrelated live call's entry and
+            # cancel its watchdog. Nothing to answer either way.
             return
         self._discard_pending(req_id)
         text = (f"[vrc-mcp-proxy] a proxy request guard failed with "
@@ -322,11 +332,11 @@ class Proxy:
         original_arguments = arguments
 
         if self.cfg.get("allowlist", True) and not is_allowed(name):
-            self._write_client(refusal_result(req_id, name))
+            self._write_terminal(refusal_result(req_id, name))
             return
 
         if self.cfg.get("canary", True) and name in self.drifted:
-            self._write_client(tool_error_result(req_id, canary.drift_refusal_text(name)))
+            self._write_terminal(tool_error_result(req_id, canary.drift_refusal_text(name)))
             return
 
         if self.cfg.get("instance_guard", True) and name != "set_active_instance":
@@ -337,7 +347,7 @@ class Proxy:
                 per_call, self.active_instance, len(live),
                 [f"{hb['project_name'] or hb['hash']}@{hb['hash']}" for hb in live])
             if refusal is not None:
-                self._write_client(tool_error_result(req_id, refusal))
+                self._write_terminal(tool_error_result(req_id, refusal))
                 return
 
         venue = None  # set only on the execute_code path; read by _remember below
@@ -364,7 +374,7 @@ class Proxy:
                 # default), and refusing every call on an unreadable directory would be a
                 # far worse failure than the one being closed.
                 if venue is None and selector and instances.read_heartbeats():
-                    self._write_client(tool_error_result(
+                    self._write_terminal(tool_error_result(
                         req_id,
                         f"[vrc-mcp-proxy] the pinned instance {selector!r} does not resolve "
                         f"to exactly one live Unity editor, so the venue this snippet would "
@@ -376,7 +386,7 @@ class Proxy:
             action, payload = execute_code.transform_request(
                 arguments, self.cfg, assets_path=venue)
             if action == "refuse":
-                self._write_client(tool_error_result(req_id, payload))
+                self._write_terminal(tool_error_result(req_id, payload))
                 return
             arguments = payload
             # How many lines we just injected ahead of the caller's code, for the
@@ -392,12 +402,12 @@ class Proxy:
         elif name == "manage_scene" and self.cfg.get("manage_scene_arg_guard", True):
             refusal = manage_scene.refusal_for(arguments)
             if refusal is not None:
-                self._write_client(tool_error_result(req_id, refusal))
+                self._write_terminal(tool_error_result(req_id, refusal))
                 return
         elif name == "manage_asset" and self.cfg.get("manage_asset_mutation_guard", True):
             refusal = manage_asset.refusal_for(arguments)
             if refusal is not None:
-                self._write_client(tool_error_result(req_id, refusal))
+                self._write_terminal(tool_error_result(req_id, refusal))
                 return
         elif name == "manage_camera" and \
                 self.cfg.get("manage_camera_screenshot_output", True):
@@ -441,7 +451,7 @@ class Proxy:
 
         # Notifications and anything without an id we tracked: pass through.
         if "id" not in msg or "method" in msg:
-            self._write_client(msg)
+            self._write_terminal(msg)
             return
 
         info, was_timed_out = self._take(msg["id"])
@@ -451,7 +461,7 @@ class Proxy:
         if was_timed_out:
             return
         if info is None:
-            self._write_client(msg)
+            self._write_terminal(msg)
             return
 
         # Anything raising past here is classified BEFORE it reaches the boundary, which can
@@ -509,6 +519,16 @@ class Proxy:
                 # session — see instances.canonical_instance. Unresolvable: keep the raw
                 # value, which still pins routing upstream and still satisfies
                 # instance_guard.
+                # Raw pin FIRST, then canonicalize over it. `canonical_instance` reads the
+                # heartbeat directory, so it can raise — and evaluated on the right-hand side
+                # of one assignment it would leave `active_instance` at None while upstream is
+                # pinned. This region is classified advisory on the premise that the pin is
+                # already committed when it fails; that premise has to be true in the code and
+                # not just in the comment. With no selector, `resolve_assets_path` takes its
+                # freshness-filtered branch and the venue guard's own unresolved-pin refusal
+                # cannot fire either (`selector` is falsy), so `execute_code` would forward
+                # with no guard emitted — the call nobody is checking, one call later.
+                self.active_instance = info["requested_instance"]
                 self.active_instance = (
                     instances.canonical_instance(info["requested_instance"])
                     or info["requested_instance"])
@@ -719,7 +739,14 @@ class Proxy:
         self.log(f"[vrc-mcp-proxy] {failure.label} raised, contained as "
                  f"{failure.kind}; the relay is still serving.\n"
                  f"{traceback.format_exc().rstrip()}")
-        req_id = _id_and_method(line)[0]
+        req_id, method = _id_and_method(line)
+        if method is not None:
+            # Not an answer to a client call — a server-originated request or notification
+            # relayed toward the client, whose id (if any) lives in the SERVER's id space. See
+            # `_on_relay_failure` for why touching it would disarm an unrelated client call.
+            # Unreachable from a classified region today (all of them run downstream of
+            # `_take`, which only sees responses) and cheap to hold.
+            req_id = None
         if req_id is not None:
             # A no-op for every region that exists TODAY: all of them raise downstream of
             # `_take`, which has already popped pending and cancelled the timer. Kept because a
@@ -762,8 +789,15 @@ class Proxy:
         self.log(f"[vrc-mcp-proxy] the relay raised outside any guarded region "
                  f"({type(exc).__name__}: {exc}); contained, still serving.\n"
                  f"{traceback.format_exc().rstrip()}")
-        req_id = _id_and_method(line)[0]
-        if req_id is None:
+        req_id, method = _id_and_method(line)
+        if req_id is None or method is not None:
+            # JSON-RPC ids are PER-DIRECTION. A line carrying both an id and a method is a
+            # server-originated request travelling toward the client (`roots/list`, `ping`,
+            # `sampling/*`), and its id indexes the server's own space: answering it would
+            # fabricate a result for a request the client never sent, while
+            # `_discard_pending` would pop whichever CLIENT call happens to share that
+            # number and cancel its F52 watchdog — silently disarming an unrelated hung
+            # call. This arm is reachable for such a line, via the passthrough write.
             return
         self._discard_pending(req_id)
         self._safe_write(rpc_error(
@@ -788,6 +822,14 @@ class Proxy:
             print(f"[vrc-mcp-proxy] the relay could not read upstream's stream "
                   f"({type(exc).__name__}: {exc}); the proxy cannot serve without it.\n"
                   f"{traceback.format_exc().rstrip()}", file=sys.stderr, flush=True)
+            # Terminate the child before exiting. `os._exit` skips `main`'s
+            # `finally: child.terminate()`, and unlike `_watch_child`'s exit the child here is
+            # ALIVE — leaving it orphaned holds its Unity bridge connection open and makes the
+            # next proxy launch flaky.
+            try:
+                self.child.terminate()
+            except Exception:  # noqa: BLE001 - already exiting; nothing left to salvage
+                pass
             os._exit(1)
 
 

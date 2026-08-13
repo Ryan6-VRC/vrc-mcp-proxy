@@ -242,3 +242,18 @@ def test_assets_path_without_clock_on_filtered_path_is_unresolved(tmp_path):
     _write_hb(tmp_path, "aaaa1111", 6401, "C:/proj/One", "One",
               last_heartbeat=_iso(datetime.now(timezone.utc)))
     assert instances.resolve_assets_path(None, None, str(tmp_path)) is None
+
+
+def test_read_heartbeats_skips_a_non_string_project_path(tmp_path):
+    """The field reads are dict accesses; `os.path.dirname` is not. A numeric or list
+    project_path raises TypeError, which `(OSError, ValueError)` does not cover — same
+    file-corruption family as the non-UTF-8 byte and the top-level-non-object payload."""
+    for i, bad in enumerate([1234, ["a", "b"], {"p": 1}, True]):
+        (tmp_path / f"unity-mcp-status-deadbee{i}.json").write_text(
+            json.dumps({"project_path": bad, "unity_port": 6400}), encoding="utf-8")
+    (tmp_path / "unity-mcp-status-cafebabe.json").write_text(
+        json.dumps({"project_path": "C:/Venue/Assets", "unity_port": 6401}), encoding="utf-8")
+
+    out = instances.read_heartbeats(str(tmp_path))
+    assert [hb["hash"] for hb in out] == ["cafebabe"]
+    assert out[0]["project_root"] == "C:/Venue"
