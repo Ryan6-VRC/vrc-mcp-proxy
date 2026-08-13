@@ -13,6 +13,7 @@ import argparse
 import json
 import os
 import queue
+import re
 import subprocess
 import sys
 import threading
@@ -126,6 +127,47 @@ class MCPClient:
                 "raw_texts": texts, "structured": structured}
 
 
+_GUID_RE = re.compile(r"^guid:\s*([0-9a-fA-F]{32})\s*$", re.MULTILINE)
+
+
+def _meta_guid(proj, asset_path):
+    """The GUID in `<asset_path>.meta`, or "" if absent/unreadable.
+
+    Read off disk rather than asked of Unity on purpose: this runs immediately after the
+    G22 probe has deliberately blocked the main thread, so every extra round trip is one
+    more thing to time out — and the question here is only whether the SAME asset is now at
+    the destination, which its `.meta` answers. A collision leaves a different GUID there.
+    """
+    try:
+        with open(os.path.join(proj, asset_path + ".meta"), encoding="utf-8") as f:
+            m = _GUID_RE.search(f.read())
+    except OSError:
+        return ""
+    return m.group(1) if m else ""
+
+
+def _wait_until_responsive(c, tries=6, timeout=60):
+    """Block until the editor answers a trivial snippet, or give up.
+
+    The G22 probe leaves the main thread asleep for 35s *twice* (that is the bug it
+    measures), and the fixed sleep after it is not always enough — an F22 call issued into
+    that window times out and, unhandled, takes the whole run down along with the verdicts
+    already collected. Returns True if the editor answered.
+    """
+    for attempt in range(tries):
+        try:
+            r = c.call_tool("execute_code", {"action": "execute", "code": 'return "ping";'},
+                            timeout=timeout)
+        except TimeoutError:
+            continue
+        payload = r.get("payload")
+        if isinstance(payload, dict) and payload.get("success"):
+            if attempt:
+                print(f"[wait] editor responsive after {attempt + 1} probe(s)", flush=True)
+            return True
+    return False
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--instance", required=True,
@@ -182,31 +224,99 @@ def main():
            "REPRODUCED" if n >= 2 else ("NOT-REPRODUCED" if n == 1 else "NO-EXEC"),
            f"marker lines={n}, elapsed={elapsed:.0f}s, response={resp}")
 
-    # -- F22: three ordinary manage_asset moves, disk-verified --
+    # -- F22: ordinary manage_asset moves, GUID-verified --
+    # Dest is EMPTIED, not merely created: an interrupted earlier run leaves its cleanup
+    # unrun, and a leftover file at the destination makes upstream report success:false
+    # *correctly* (collision) with the destination on disk — which a
+    # "reported-failure + destination-exists" test scores as the lie, retiring nothing and
+    # keeping a guard alive on a false positive.
     setup = (
         'if (!UnityEditor.AssetDatabase.IsValidFolder("Assets/A10Repro")) '
         'UnityEditor.AssetDatabase.CreateFolder("Assets", "A10Repro");\n'
+        'if (UnityEditor.AssetDatabase.IsValidFolder("Assets/A10Repro/Dest")) '
+        'UnityEditor.AssetDatabase.DeleteAsset("Assets/A10Repro/Dest");\n'
+        'UnityEditor.AssetDatabase.CreateFolder("Assets/A10Repro", "Dest");\n'
         'for (int i = 0; i < 3; i++) {\n'
         '  var m = new UnityEngine.Material(UnityEngine.Shader.Find("Standard"));\n'
         '  UnityEditor.AssetDatabase.CreateAsset(m, $"Assets/A10Repro/mat{i}.mat");\n'
         '}\n'
-        'if (!UnityEditor.AssetDatabase.IsValidFolder("Assets/A10Repro/Dest")) '
-        'UnityEditor.AssetDatabase.CreateFolder("Assets/A10Repro", "Dest");\n'
         'UnityEditor.AssetDatabase.SaveAssets();\n'
         'return "setup done";'
     )
-    r = c.call_tool("execute_code", {"action": "execute", "code": setup}, timeout=120)
+    if not _wait_until_responsive(c):
+        record("F22-move-lies", "INCONCLUSIVE",
+               "editor never became responsive after the G22 probe; no move was issued")
+        record("F22b-bare-destination-relocates", "INCONCLUSIVE", "same")
+        return _finish(c, args)
+    # safety_checks off: emptying Dest needs AssetDatabase.DeleteAsset, which the bridge's
+    # _blockedPatterns rejects by substring on a default call.
+    r = c.call_tool("execute_code", {"action": "execute", "code": setup,
+                                     "safety_checks": False}, timeout=120)
     print(f"[f22-setup] {json.dumps(r.get('payload'))[:200]}", flush=True)
+    # Source GUIDs off disk, after setup — the pairing the verdict turns on.
+    pre_guids = [_meta_guid(proj, f"Assets/A10Repro/mat{i}.mat") for i in range(3)]
+    # Setup can time out on upstream's own recv deadline (that IS G22, one probe earlier),
+    # leaving no assets to move. Every move then reports "Source asset not found" — a
+    # correct verdict on a broken fixture, which scores as NOT-REPRODUCED and reads exactly
+    # like "upstream fixed the lie". Refuse to render a verdict instead.
+    if not all(pre_guids):
+        record("F22-move-lies", "INCONCLUSIVE",
+               f"fixture not in place — GUIDs found: {pre_guids}; setup reported "
+               f"{json.dumps(r.get('payload'))[:160]}")
+        record("F22b-bare-destination-relocates", "INCONCLUSIVE", "fixture setup failed")
+        return _finish(c, args)
     f22 = []
     for i in range(3):
         src, dst = f"Assets/A10Repro/mat{i}.mat", f"Assets/A10Repro/Dest/mat{i}.mat"
-        r = c.call_tool("manage_asset", {"action": "move", "path": src, "destination": dst}, timeout=90)
-        ok_reported = not (r.get("_rpc_error") or r.get("isError"))
-        on_disk = os.path.exists(os.path.join(proj, dst))
-        f22.append((ok_reported, on_disk, json.dumps(r.get("_rpc_error") or r.get("payload"))[:150]))
-    lies = [x for x in f22 if x[1] and not x[0]]
-    record("F22-move-lies", "REPRODUCED" if lies else "NOT-REPRODUCED(idle)",
-           "; ".join(f"reported_ok={a} disk={b} {d}" for a, b, d in f22))
+        try:
+            r = c.call_tool("manage_asset", {"action": "move", "path": src, "destination": dst},
+                            timeout=90)
+        except TimeoutError:
+            f22.append((None, None, "timed out"))
+            continue
+        # The lie is a SUCCESS-shaped result carrying `success:false` in its payload, not an
+        # isError result — keying on isError reports NOT-REPRODUCED while the lie fires on
+        # every call, which is what this check used to do.
+        payload = r.get("payload")
+        ok_reported = (isinstance(payload, dict) and payload.get("success") is True
+                       and not r.get("_rpc_error") and not r.get("isError"))
+        # "Destination exists" is not "the move landed" — a collision satisfies it too. The
+        # move landed only if the destination carries THIS asset's GUID and the source is
+        # gone.
+        landed = bool(pre_guids[i]) and _meta_guid(proj, dst) == pre_guids[i] \
+            and not os.path.exists(os.path.join(proj, src))
+        f22.append((ok_reported, landed, json.dumps(r.get("_rpc_error") or payload)[:150]))
+    lies = [x for x in f22 if x[1] and x[0] is False]
+    timed_out = [x for x in f22 if x[0] is None]
+    verdict = "REPRODUCED" if lies else (
+        "INCONCLUSIVE" if len(timed_out) == len(f22) else "NOT-REPRODUCED(idle)")
+    record("F22-move-lies", verdict,
+           "; ".join(f"reported_ok={a} landed={b} {d}" for a, b, d in f22))
+
+    # -- F22b: the OTHER lie in the same arm — a bare destination resolves to Assets/<name>,
+    # not beside the source. Independent of the verdict lie above: upstream could report
+    # move verdicts honestly and still relocate every bare-name rename to the project root,
+    # so the refusal is not retired until BOTH read clean.
+    r = c.call_tool("execute_code", {"action": "execute", "code": (
+        'UnityEditor.AssetDatabase.DeleteAsset("Assets/A10Repro/bare.mat");\n'
+        'UnityEditor.AssetDatabase.DeleteAsset("Assets/a10_bare_out.mat");\n'
+        'UnityEditor.AssetDatabase.CreateAsset('
+        'new UnityEngine.Material(UnityEngine.Shader.Find("Standard")), '
+        '"Assets/A10Repro/bare.mat");\n'
+        'UnityEditor.AssetDatabase.SaveAssets();\n'
+        'return "ok";'), "safety_checks": False}, timeout=120)
+    if not _meta_guid(proj, "Assets/A10Repro/bare.mat"):
+        record("F22b-bare-destination-relocates", "INCONCLUSIVE",
+               f"fixture not in place: {json.dumps(r.get('payload'))[:160]}")
+        return _finish(c, args)
+    c.call_tool("manage_asset", {"action": "rename", "path": "Assets/A10Repro/bare.mat",
+                                 "destination": "a10_bare_out.mat"}, timeout=90)
+    at_root = os.path.exists(os.path.join(proj, "Assets/a10_bare_out.mat"))
+    beside = os.path.exists(os.path.join(proj, "Assets/A10Repro/a10_bare_out.mat"))
+    record("F22b-bare-destination-relocates",
+           "REPRODUCED" if at_root else ("NOT-REPRODUCED" if beside else "INCONCLUSIVE"),
+           f"landed at Assets/ root={at_root}, beside source={beside} "
+           f"(root => a rename silently relocates; beside => upstream fixed it)")
 
     # -- F23: search for the OLD path immediately post-move --
     r = c.call_tool("manage_asset",
@@ -215,11 +325,29 @@ def main():
     stale = "A10Repro/mat" in payload and "Dest" not in payload
     record("F23-stale-search", "REPRODUCED" if stale else "CHECK-MANUALLY", payload[:400])
 
+    return _finish(c, args)
+
+
+def _finish(c, args):
+    """Clean the scratch tree, write the results file, stop the child.
+
+    Its own function so an early return (an editor that never came back from the G22 probe)
+    still cleans up and still writes the verdicts already collected — a crash there loses
+    G22's result too, which by then has already been measured.
+    """
+    # F22b's bare-destination rename lands OUTSIDE A10Repro (that is the finding), so the
+    # root path is cleaned by name — a leftover there would collide on the next run.
     cleanup = ('UnityEditor.AssetDatabase.DeleteAsset("Assets/A10Repro");\n'
+               'UnityEditor.AssetDatabase.DeleteAsset("Assets/a10_bare_out.mat");\n'
                'UnityEditor.AssetDatabase.Refresh();\nreturn "cleaned";')
-    r = c.call_tool("execute_code",
-                    {"action": "execute", "code": cleanup, "safety_checks": False}, timeout=120)
-    record("cleanup", "OK" if not r.get("isError") else "FAIL", json.dumps(r.get("payload"))[:150])
+    try:
+        r = c.call_tool("execute_code",
+                        {"action": "execute", "code": cleanup, "safety_checks": False},
+                        timeout=120)
+        record("cleanup", "OK" if not r.get("isError") else "FAIL",
+               json.dumps(r.get("payload"))[:150])
+    except TimeoutError:
+        record("cleanup", "FAIL", "timed out — Assets/A10Repro may be left behind")
 
     with open(args.out, "w", encoding="utf-8") as f:
         f.write(f"# repro results — {config.UPSTREAM_PACKAGE}\n\n")

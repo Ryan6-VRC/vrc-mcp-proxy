@@ -4,9 +4,8 @@ upstream MCP-for-Unity server, with the interception points wired in.
 Everything passes through untouched except:
   * tools/list responses  -> canary-validate + allowlist-filter
   * tools/call requests    -> allowlist / canary-drift refusal, execute_code transforms,
-                              instance-target tracking
-  * tools/call responses   -> manage_asset truth-correction, manage_gameobject
-                              inactive-target note, timeout note
+                              manage_asset mutation guard, instance-target tracking
+  * tools/call responses   -> manage_gameobject inactive-target note, timeout note
 
 Notifications, resources, prompts, initialize: pure passthrough. Child stderr -> our
 stderr. Child dies -> we exit nonzero, loudly.
@@ -82,11 +81,14 @@ def _read_execute_timeout(env=None):
 class Proxy:
     def __init__(self, cfg=None, child=None, client_out=None, log=None,
                  execute_timeout_s=None):
-        self.cfg = cfg if cfg is not None else config.load_config()
         self.child = child
         self.client_out = client_out if client_out is not None else sys.stdout
         self.log = log if log is not None else (
             lambda m: print(m, file=sys.stderr, flush=True))
+        # Logger first: load_config warns through it about disable-list names that don't
+        # exist, which is how a renamed behavior announces that an operator's setting is
+        # now a no-op rather than silently re-enabling itself.
+        self.cfg = cfg if cfg is not None else config.load_config(log=self.log)
         # Load the canary baseline only when the canary is enabled: with it disabled
         # (VRC_MCP_PROXY_DISABLE=canary — the mid-bump repair path), a missing/corrupt
         # baseline must not crash startup.
@@ -230,6 +232,11 @@ class Proxy:
             if refusal is not None:
                 self._write_client(tool_error_result(req_id, refusal))
                 return
+        elif name == "manage_asset" and self.cfg.get("manage_asset_mutation_guard", True):
+            refusal = manage_asset.refusal_for(arguments)
+            if refusal is not None:
+                self._write_client(tool_error_result(req_id, refusal))
+                return
         elif name == "manage_camera" and \
                 self.cfg.get("manage_camera_screenshot_output", True):
             arguments = manage_camera.transform_request(arguments)
@@ -337,8 +344,8 @@ class Proxy:
         # reintroduce silence at the last hop of a guard whose whole purpose is a silent
         # wrong-venue failure, so it is rewritten to an error. This is the proxy's only
         # content-keyed response transform: permitted because the key is a marker WE emitted
-        # two hops earlier, not upstream prose whose wording drifts between versions (which
-        # manage_asset.py's "NO string matching" rule is about). Scoped to action=="execute"
+        # two hops earlier, not upstream prose whose wording drifts between versions (the
+        # no-string-keying rule, design.md §Two standing rules). Scoped to action=="execute"
         # and anchored inside misroute_text — see its docstring for the get_history echo that
         # a looser match would misfire on.
         # Bound to a call we actually guarded (`venue_guarded`): a snippet that legitimately
@@ -355,11 +362,6 @@ class Proxy:
                     refusal = None
                 if refusal is not None:
                     return tool_error_result(msg["id"], refusal)
-        if self.cfg.get("manage_asset_truth_correction", True) and name == "manage_asset":
-            if manage_asset.is_move_call(args):
-                msg = manage_asset.correct_response(msg, args, info.get("active"))
-            elif manage_asset.is_delete_call(args):
-                msg = manage_asset.correct_delete_response(msg, args, info.get("active"))
         if self.cfg.get("manage_gameobject_inactive_note", True) and \
                 name == "manage_gameobject":
             msg = manage_gameobject.annotate(msg, args)

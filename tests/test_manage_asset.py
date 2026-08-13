@@ -1,290 +1,88 @@
-import json
-import os
-
-import pytest
-
-from helpers import make_result, payload_of, structured_of
-from vrc_mcp_proxy.transforms import manage_asset
+from vrc_mcp_proxy.transforms import manage_asset as ma
 
 
-def _failure_msg(payload=None):
-    payload = payload or {"success": False,
-                          "error": "MoveAsset call failed unexpectedly",
-                          "code": "MoveAsset call failed unexpectedly"}
-    return make_result(payload=payload, is_error=False)
+def test_move_is_refused():
+    text = ma.refusal_for({"action": "move", "path": "Assets/a.mat",
+                           "destination": "Assets/b/a.mat"})
+    assert text is not None and "manage_asset 'move'" in text
 
 
-def _payload(msg):
-    return payload_of(msg)
+def test_rename_is_refused():
+    text = ma.refusal_for({"action": "rename", "path": "Assets/a.mat",
+                           "destination": "b.mat"})
+    assert text is not None and "manage_asset 'rename'" in text
 
 
-@pytest.fixture
-def project(tmp_path):
-    """A fake project + one heartbeat pointing at it. Returns (root, heartbeat_dir)."""
-    root = tmp_path / "MyProject"
-    (root / "Assets").mkdir(parents=True)
-    hb = tmp_path / ".unity-mcp"
-    hb.mkdir()
-    (hb / "unity-mcp-status-abcd1234.json").write_text(json.dumps({
-        "unity_port": 6401, "project_path": str(root / "Assets").replace("\\", "/"),
-        "project_name": "MyProject"}))
-    return root, str(hb)
+def test_refusal_carries_the_door_the_caller_should_use_instead():
+    text = ma.refusal_for({"action": "move", "path": "Assets/a.mat",
+                           "destination": "Assets/b/a.mat"})
+    # What a caller cannot derive from a bare denial: which API call to make, how to read
+    # its return value, and the bare-name trap that silently relocated the asset to the
+    # project root through the tool being refused.
+    assert "AssetDatabase.MoveAsset(" in text
+    assert "empty string = the move landed" in text
+    assert "bare name" in text
 
 
-def test_moved_in_fact_is_corrected(project):
-    root, hb = project
-    dst = root / "Assets" / "Bar" / "a.mat"
-    dst.parent.mkdir(parents=True)
-    dst.write_text("moved")  # dest exists, source absent
-    args = {"action": "move", "path": "Assets/Foo/a.mat", "destination": "Assets/Bar/a.mat"}
-    out = manage_asset.correct_response(_failure_msg(), args, None, directory=hb)
-    p = _payload(out)
-    assert p["success"] is True
-    assert "inferred to have landed" in p["proxy_note"]
-    # No live error/code keys may remain on a success-rewritten response; the upstream
-    # strings move to upstream_* instead.
-    assert "error" not in p and "code" not in p
-    assert p["upstream_error"] == "MoveAsset call failed unexpectedly"
-    assert p["upstream_code"] == "MoveAsset call failed unexpectedly"
-    # The verdict has to reach the surface the client reads, and the popped error/code
-    # must not survive there: a merge-style write would leave `success:true` sitting
-    # beside the original `error`, which is the disagreement this transform is fixing.
-    assert structured_of(out) == p
+def test_redirect_snippet_throws_rather_than_returning_the_error():
+    # A snippet that returns the error string comes back as success:true with the failure
+    # in data.result — the success-shaped lie this refusal exists to close, one hop later.
+    # The redirect must not hand the caller that shape.
+    text = ma.refusal_for({"action": "move"})
+    assert "throw new System.InvalidOperationException(err);" in text
+    assert 'return err == "" ? "moved" : err;' not in text
 
 
-def test_genuine_failure_stays_failed(project):
-    root, hb = project
-    src = root / "Assets" / "Foo" / "a.mat"
-    src.parent.mkdir(parents=True)
-    src.write_text("still here")  # source present, dest absent
-    args = {"action": "move", "path": "Assets/Foo/a.mat", "destination": "Assets/Bar/a.mat"}
-    out = manage_asset.correct_response(_failure_msg(), args, None, directory=hb)
-    p = _payload(out)
-    assert p["success"] is False
-    assert "consistent with the reported failure" in p["proxy_note"]
-    assert structured_of(out) == p
+def test_refusal_tells_a_rename_how_to_stay_in_place():
+    # MoveAsset rejects a bare name, and upstream's mis-resolution of one is half of why
+    # this arm is denied — so the refusal cannot leave the caller to derive the folder.
+    text = ma.refusal_for({"action": "rename"})
+    assert "Assets/Foo/bar.mat" in text and "Assets/Foo/baz.mat" in text
 
 
-def test_unresolvable_root_is_annotated(tmp_path):
-    empty_hb = str(tmp_path / "empty")
-    os.makedirs(empty_hb)
-    args = {"action": "move", "path": "Assets/Foo/a.mat", "destination": "Assets/Bar/a.mat"}
-    out = manage_asset.correct_response(_failure_msg(), args, None, directory=empty_hb)
-    p = _payload(out)
-    assert p["success"] is False
-    assert "could not verify on disk" in p["proxy_note"]
+def test_refusal_survives_a_c_sharp_body_without_format_errors():
+    # The body embeds C#; building it with str.format would raise KeyError on a brace the
+    # next edit introduces, turning every refusal into a crash on the error path.
+    for action in ("move", "rename"):
+        assert ma.refusal_for({"action": action}).count("{") == \
+            ma.refusal_for({"action": action}).count("}")
 
 
-def test_success_response_untouched(project):
-    root, hb = project
-    args = {"action": "move", "path": "Assets/Foo/a.mat", "destination": "Assets/Bar/a.mat"}
-    msg = _failure_msg({"success": True})
-    out = manage_asset.correct_response(msg, args, None, directory=hb)
-    assert "proxy_note" not in _payload(out)
+def test_delete_forwards():
+    # Upstream reports delete honestly — a landed delete comes back success:true, a path
+    # that never existed comes back with upstream's own "Asset not found". The correction
+    # that used to run here fired only on correctly-reported failures and rewrote them to
+    # success, so a mistyped path read as a completed delete. Nothing left to guard.
+    assert ma.refusal_for({"action": "delete", "path": "Assets/a.mat"}) is None
 
 
-def test_prefixless_move_corrected(project):
-    # Upstream accepts prefix-less asset paths ("Foo/a.mat"); the proxy must normalize to
-    # Assets/... before the disk check or it confidently reports a move that DID land as
-    # "did not occur".
-    root, hb = project
-    dst = root / "Assets" / "Bar" / "a.mat"
-    dst.parent.mkdir(parents=True)
-    dst.write_text("moved")
-    args = {"action": "move", "path": "Foo/a.mat", "destination": "Bar/a.mat"}
-    out = manage_asset.correct_response(_failure_msg(), args, None, directory=hb)
-    p = _payload(out)
-    assert p["success"] is True
-    assert "inferred to have landed" in p["proxy_note"]
+def test_read_only_and_creating_actions_forward():
+    for action in ("search", "get_info", "get_components", "create", "create_folder",
+                   "import", "modify", "duplicate"):
+        assert ma.refusal_for({"action": action, "path": "Assets/a.mat"}) is None, action
 
 
-def test_move_rewrite_does_not_claim_more_than_it_observed(project):
-    """A move whose SOURCE never existed, onto a destination that ALREADY existed, is
-    indistinguishable on disk from a move that landed: dest present, source absent. The
-    rewrite still fires (that ambiguity is inherent to a two-stat check), so the note must
-    disclose the inference rather than report a verified move — the delete arm has always
-    said "inferred from absence", and this arm claimed "verified" on the same evidence.
-    """
-    root, hb = project
-    dst = root / "Assets" / "Bar" / "a.mat"
-    dst.parent.mkdir(parents=True)
-    dst.write_text("was already here, nothing moved onto it")
-    args = {"action": "move", "path": "Assets/Foo/never-existed.mat",
-            "destination": "Assets/Bar/a.mat"}
-    out = manage_asset.correct_response(
-        _failure_msg({"success": False, "error": "Source asset not found",
-                      "code": "Source asset not found"}),
-        args, None, directory=hb)
-    p = _payload(out)
-    assert p["success"] is True
-    note = p["proxy_note"]
-    assert "verified" not in note
-    assert "inferred" in note and "not observed" in note
-    assert structured_of(out) == p
+def test_action_case_and_padding_are_normalized():
+    # Upstream types `action` as a Literal (services/tools/manage_asset.py:32), so a
+    # non-exact spelling never dispatches — its own `.lower()` sits behind that check and
+    # nothing strips. Normalizing here only guarantees the guard can never be narrower than
+    # the tool it guards.
+    for spelling in (" Move ", "MOVE", "Rename", " rENAME"):
+        assert ma.refusal_for({"action": spelling}) is not None, spelling
 
 
-def test_traversal_path_is_unverifiable(project):
-    # An absolute/traversal path escapes the project — unverifiable, never truth-corrected.
-    root, hb = project
-    args = {"action": "move", "path": "../../../etc/passwd", "destination": "Bar/a.mat"}
-    out = manage_asset.correct_response(_failure_msg(), args, None, directory=hb)
-    p = _payload(out)
-    assert p["success"] is False
-    assert "could not verify" in p["proxy_note"]
+def test_refusal_names_the_normalized_action():
+    assert "manage_asset 'move'" in ma.refusal_for({"action": " MOVE "})
 
 
-def test_empty_destination_is_unverifiable(project):
-    # Empty destination once resolved to the source's parent dir (which exists) -> a
-    # genuinely-failed move with a missing source got rewritten to success. Must not.
-    root, hb = project
-    # source is absent and destination is empty: no target path to confirm.
-    args = {"action": "move", "path": "Assets/Foo/a.mat", "destination": ""}
-    out = manage_asset.correct_response(_failure_msg(), args, None, directory=hb)
-    p = _payload(out)
-    assert p["success"] is False
-    assert "destination" in p["proxy_note"].lower()
+def test_missing_or_non_string_action_forwards():
+    # Upstream owns argument validation; guessing here would refuse a call it would have
+    # handled, and upstream's own error names the real problem.
+    for args in ({}, {"path": "Assets/a.mat"}, {"action": None}, {"action": 7},
+                 {"action": ["move"]}):
+        assert ma.refusal_for(args) is None, args
 
 
-def test_is_move_call():
-    assert manage_asset.is_move_call({"action": "move"})
-    assert manage_asset.is_move_call({"action": "rename"})
-    assert not manage_asset.is_move_call({"action": "create"})
-
-
-def _delete_failure_msg():
-    return _failure_msg({"success": False,
-                         "error": "DeleteAsset call failed unexpectedly",
-                         "code": "DeleteAsset call failed unexpectedly"})
-
-
-def test_is_delete_call():
-    assert manage_asset.is_delete_call({"action": "delete"})
-    assert not manage_asset.is_delete_call({"action": "move"})
-    assert not manage_asset.is_delete_call({"action": "create"})
-    assert not manage_asset.is_delete_call("not a dict")
-
-
-def test_deleted_in_fact_is_corrected(project):
-    # Both the asset and its .meta are gone on disk -> rewrite to success, inferred from
-    # absence (never "observed" -- delete inherits G50's pin-correctness gap, see G52).
-    root, hb = project
-    args = {"action": "delete", "path": "Assets/Foo.mat"}
-    out = manage_asset.correct_delete_response(_delete_failure_msg(), args, None, directory=hb)
-    p = _payload(out)
-    assert p["success"] is True
-    assert "inferred from absence" in p["proxy_note"]
-    assert "error" not in p and "code" not in p
-    assert p["upstream_error"] == "DeleteAsset call failed unexpectedly"
-    assert p["upstream_code"] == "DeleteAsset call failed unexpectedly"
-    assert structured_of(out) == p
-
-
-def test_delete_genuine_failure_stays_failed(project):
-    # Asset still present on disk -> genuinely failed, left alone.
-    root, hb = project
-    asset = root / "Assets" / "Foo.mat"
-    asset.write_text("still here")
-    (root / "Assets" / "Foo.mat.meta").write_text("meta")
-    args = {"action": "delete", "path": "Assets/Foo.mat"}
-    out = manage_asset.correct_delete_response(_delete_failure_msg(), args, None, directory=hb)
-    p = _payload(out)
-    assert p["success"] is False
-    assert "still exists" in p["proxy_note"]
-
-
-def test_delete_orphan_meta_not_rewritten(project):
-    # Asset gone but its .meta lingers -> unclean delete, not truth-corrected.
-    root, hb = project
-    (root / "Assets" / "Foo.mat.meta").write_text("meta")
-    args = {"action": "delete", "path": "Assets/Foo.mat"}
-    out = manage_asset.correct_delete_response(_delete_failure_msg(), args, None, directory=hb)
-    p = _payload(out)
-    assert p["success"] is False
-    assert ".meta remains" in p["proxy_note"]
-
-
-def test_delete_unresolvable_root_is_annotated(tmp_path):
-    empty_hb = str(tmp_path / "empty")
-    os.makedirs(empty_hb)
-    args = {"action": "delete", "path": "Assets/Foo.mat"}
-    out = manage_asset.correct_delete_response(_delete_failure_msg(), args, None, directory=empty_hb)
-    p = _payload(out)
-    assert p["success"] is False
-    assert "could not verify on disk" in p["proxy_note"]
-
-
-def test_delete_traversal_path_is_unverifiable(project):
-    root, hb = project
-    args = {"action": "delete", "path": "../../../etc/passwd"}
-    out = manage_asset.correct_delete_response(_delete_failure_msg(), args, None, directory=hb)
-    p = _payload(out)
-    assert p["success"] is False
-    assert "could not verify" in p["proxy_note"]
-
-
-def test_delete_traversal_within_root_escaping_assets_is_unverifiable(project):
-    # F4: "Assets/../ProjectSettings/Foo.asset" normalizes to <root>/ProjectSettings/
-    # Foo.asset -- still inside the project root, so it used to pass the root-commonpath
-    # guard and get falsely truth-corrected (the target doesn't exist -> "both gone" ->
-    # success:true), despite escaping Assets/ itself.
-    root, hb = project
-    args = {"action": "delete", "path": "Assets/../ProjectSettings/Foo.asset"}
-    out = manage_asset.correct_delete_response(_delete_failure_msg(), args, None, directory=hb)
-    p = _payload(out)
-    assert p["success"] is False
-    assert "could not verify" in p["proxy_note"]
-
-
-def test_delete_success_response_untouched(project):
-    root, hb = project
-    args = {"action": "delete", "path": "Assets/Foo.mat"}
-    msg = _failure_msg({"success": True})
-    out = manage_asset.correct_delete_response(msg, args, None, directory=hb)
-    assert "proxy_note" not in _payload(out)
-
-
-# --- Fix 3: os.path.exists() can't prove "gone" -- lstat three-state -------
-def test_delete_unverifiable_lstat_failure_not_rewritten(project, monkeypatch):
-    # Neither the asset nor its .meta exist for real, so the old os.path.exists() check
-    # would happily rewrite this to success. But the target's lstat fails with something
-    # other than FileNotFoundError (e.g. a permission/IO error) -- that's "couldn't tell",
-    # not "confirmed gone", and must NOT be truth-corrected.
-    root, hb = project
-    target = str(root / "Assets" / "Foo.mat")
-    real_lstat = os.lstat
-
-    def fake_lstat(path, *a, **k):
-        if os.path.normpath(str(path)) == os.path.normpath(target):
-            raise PermissionError("denied")
-        return real_lstat(path, *a, **k)
-
-    monkeypatch.setattr(os, "lstat", fake_lstat)
-    args = {"action": "delete", "path": "Assets/Foo.mat"}
-    out = manage_asset.correct_delete_response(_delete_failure_msg(), args, None, directory=hb)
-    p = _payload(out)
-    assert p["success"] is False
-    assert "could not confirm" in p["proxy_note"]
-
-
-def test_move_unverifiable_lstat_failure_not_rewritten(project, monkeypatch):
-    # dest exists and src genuinely doesn't -- the old os.path.exists() check would rewrite
-    # this to success. But the src's lstat fails with a non-FileNotFoundError OSError, so
-    # it must be left as an unverifiable failure instead.
-    root, hb = project
-    dst = root / "Assets" / "Bar" / "a.mat"
-    dst.parent.mkdir(parents=True)
-    dst.write_text("moved")
-    src_target = str(root / "Assets" / "Foo" / "a.mat")
-    real_lstat = os.lstat
-
-    def fake_lstat(path, *a, **k):
-        if os.path.normpath(str(path)) == os.path.normpath(src_target):
-            raise PermissionError("denied")
-        return real_lstat(path, *a, **k)
-
-    monkeypatch.setattr(os, "lstat", fake_lstat)
-    args = {"action": "move", "path": "Assets/Foo/a.mat", "destination": "Assets/Bar/a.mat"}
-    out = manage_asset.correct_response(_failure_msg(), args, None, directory=hb)
-    p = _payload(out)
-    assert p["success"] is False
-    assert "could not confirm" in p["proxy_note"]
+def test_non_dict_arguments_forward():
+    for args in (None, "move", [], 7):
+        assert ma.refusal_for(args) is None, args

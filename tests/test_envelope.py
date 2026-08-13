@@ -29,9 +29,10 @@ def test_mirrored_structured_content_is_replaced():
 
 
 def test_replace_not_merge_leaves_no_stale_keys():
-    """manage_asset pops error/code into upstream_* on a success rewrite. A merge-style
-    write would leave the originals sitting in structuredContent beside success:true —
-    the exact two-surface disagreement this helper exists to prevent."""
+    """A verdict rewrite that moves error/code aside into upstream_* must replace, not
+    merge: a merge leaves the originals in structuredContent beside success:true — the
+    exact two-surface disagreement this helper exists to prevent. No transform rewrites a
+    verdict today, so this pins the contract for the next one that does."""
     msg = make_result(payload={"success": False, "error": "boom", "code": "boom"})
     text = msg["result"]["content"][0]["text"]
     payload = json.loads(text)
