@@ -116,6 +116,29 @@ def test_suppression_scopes_the_reverify_burden_to_mutations():
     assert "record of it" in code
 
 
+def _strip_csharp_literals(code):
+    """(code with every string literal removed, whether a literal was left open).
+
+    A real scanner rather than `code.split('"')`, because `csharp_literal` legitimately emits
+    `\\"` inside a literal and a naive split reads that as a literal boundary — which is how
+    the earlier version of this test ended up banning escapes outright.
+    """
+    out, in_literal, escaped = [], False, False
+    for ch in code:
+        if in_literal:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_literal = False
+        elif ch == '"':
+            in_literal = True
+        else:
+            out.append(ch)
+    return "".join(out), in_literal
+
+
 def test_wrap_preamble_is_balanced_csharp():
     """A stray quote or backslash in a reword = CS1010 on 100% of execute_code calls.
 
@@ -123,24 +146,44 @@ def test_wrap_preamble_is_balanced_csharp():
     through `csharp_literal`, and nothing else in the suite would notice: every other
     assertion here is a substring check that passes happily on syntactically broken C#.
     """
-    preamble = ec._wrap_preamble("vrcproxy:fixed")
-    assert "\\" not in preamble, (
-        "a backslash in the generated C# is an escape sequence, not a literal character")
-    # Every `"` must open or close a literal: an odd count on a line leaves one unterminated.
-    for line in preamble.splitlines():
-        assert line.count('"') % 2 == 0, f"unbalanced quote in generated C#: {line!r}"
-
+    # The prose is escaped at the boundary, so an inner quote or a non-ASCII character in a
+    # branch constant is LEGAL and must stay legal — an earlier version of this test banned
+    # every backslash in the preamble, which forbade exactly the `\"` and `\uXXXX` that
+    # `csharp_literal` emits, i.e. it outlawed the escaping it was meant to protect. What is
+    # actually fragile is the hand-written skeleton, so that is what gets asserted.
+    skeleton, unterminated = _strip_csharp_literals(
+        ec.wrap_idempotent("return 1;", guid="vrcproxy:fixed"))
+    assert not unterminated, "a string literal in the generated C# is never closed"
+    assert "\\" not in skeleton, (
+        "a backslash OUTSIDE a string literal is not an escape — the skeleton is broken")
     # Brackets balance across the WHOLE wrap, never the preamble alone: the preamble
     # deliberately ends mid-expression, opening the `((System.Func<object>)(() => {` that
-    # `_WRAP_TRAILER` closes around the caller's code. And they are counted with string
-    # literals stripped, or the "(null)" inside the success branch's text would register as
-    # an unclosed paren. Safe to split on `"` because the no-backslash assertion above rules
-    # out escaped quotes.
-    whole = ec.wrap_idempotent("return 1;", guid="vrcproxy:fixed")
-    outside_literals = "".join(whole.split('"')[::2])
+    # `_WRAP_TRAILER` closes around the caller's code. Counted on the skeleton, so the
+    # "(null)" inside the success branch's prose cannot register as an unclosed paren.
     for opener, closer in (("(", ")"), ("{", "}")):
-        assert outside_literals.count(opener) == outside_literals.count(closer), (
+        assert skeleton.count(opener) == skeleton.count(closer), (
             f"unbalanced {opener}{closer} in generated C#")
+
+
+def test_branch_prose_is_routed_through_csharp_literal():
+    # The guarantee the docstring makes. If someone hand-embeds a branch string again, the
+    # escaping stops applying and a reworded quote is CS1010 on every execute_code call.
+    preamble = ec._wrap_preamble("vrcproxy:fixed")
+    for const in (ec._SUPPRESSED_HEAD, ec._SUPPRESSED_RUNNING, ec._SUPPRESSED_FAILED,
+                  ec._SUPPRESSED_SUCCEEDED):
+        assert ec.csharp_literal(const) in preamble
+
+
+def test_rewording_a_branch_with_a_quote_or_em_dash_stays_valid(monkeypatch):
+    # The reword this indirection exists to make safe — an em dash is this repo's house
+    # prose style, and it used to fail the balance test above.
+    monkeypatch.setattr(ec, "_SUPPRESSED_FAILED",
+                        'That run FAILED — your "work" did NOT land: ')
+    skeleton, unterminated = _strip_csharp_literals(
+        ec.wrap_idempotent("return 1;", guid="vrcproxy:fixed"))
+    assert not unterminated
+    assert "\\" not in skeleton
+    assert ec.wrap_idempotent("return 1;", guid="g").isascii()
 
 
 def test_suppression_prefixes_match_their_substring_offsets():

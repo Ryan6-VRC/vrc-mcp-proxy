@@ -166,9 +166,85 @@ def test_reloading_past_upstreams_grace_says_wait_not_repin(tmp_path):
     msg = make_result(payload=_fail(ERR_NONE_CONNECTED))
     _annotate(msg, tmp_path)
     note = _note(msg)
-    assert "Wait for the domain reload" in note
+    assert "Wait for it, then pin again" in note
     assert "Do NOT re-pin in a loop" in note
     assert "bare re-pin is the cure" not in note
+
+
+def test_reloading_forever_stops_saying_wait(tmp_path):
+    """The wait branch is bounded, or it prescribes an unbounded wait with no exit.
+
+    `reloading:true` is written before the reload starts and every site that clears it needs
+    a live process, so an Editor killed or crashed MID-reload leaves the flag set forever —
+    the one regime where it means death rather than progress, since a reload that resumes
+    rewrites it. Unbounded, the note told the reader to wait indefinitely AND explicitly not
+    to re-pin, which is the only thing that would have helped.
+    """
+    _hb_file(tmp_path, age_s=1800, reloading=True, reason="reloading")
+    msg = make_result(payload=_fail(ERR_NONE_CONNECTED))
+    _annotate(msg, tmp_path)
+    note = _note(msg)
+    assert "Do NOT re-pin in a loop" not in note
+    assert "crash mid-reload" in note
+    assert "Try one re-pin first" in note
+
+
+def test_reload_branch_names_the_reason_it_read(tmp_path):
+    # The bridge also writes reloading:true with reason "port_busy" — a port conflict, not a
+    # domain reload. The note reports what it read rather than asserting the cause.
+    _hb_file(tmp_path, age_s=20, reloading=True, reason="port_busy")
+    msg = make_result(payload=_fail(ERR_NONE_CONNECTED))
+    _annotate(msg, tmp_path)
+    assert "port_busy" in _note(msg)
+
+
+def test_stale_branch_offers_the_cheap_action_before_going_to_look(tmp_path):
+    # A heavy import blocks the main thread, which is where the heartbeat is written, so an
+    # alive-but-busy editor looks stale. "Go check the Editor" there is the wasted trip this
+    # whole behavior exists to delete.
+    _hb_file(tmp_path, age_s=600)
+    msg = make_result(payload=_fail(ERR_NONE_CONNECTED))
+    _annotate(msg, tmp_path)
+    note = _note(msg)
+    assert "Try one re-pin first" in note
+    assert note.index("Try one re-pin first") < note.index("dead editor")
+
+
+# --- the port selector: stdio-only, so ONLY this proxy ever sees it ---------
+# Verbatim from services/tools/set_active_instance.py:47 and
+# transport/unity_instance_middleware.py:175.
+ERR_PORT_MISS = ("No Unity instance found on port 6402. Available: One@aaaa1111 "
+                 "(port 6401).")
+
+
+def test_port_selector_miss_earns_the_note(tmp_path):
+    # `not found. Available` does not match this string ("found on port 6402. Available:"),
+    # so it needs its own marker — and port targeting is a documented form that is reachable
+    # only through this proxy.
+    _hb_file(tmp_path, port=6402)
+    msg = make_result(payload=_fail(ERR_PORT_MISS))
+    inote.annotate(msg, "set_active_instance", {"instance": "6402"},
+                   {"requested_instance": "6402"}, directory=str(tmp_path), now=NOW)
+    assert "bare re-pin is the cure" in _note(msg)
+
+
+# --- the selector upstream would reject however often you retry -------------
+def test_wrong_name_with_a_right_hash_earns_no_note(tmp_path):
+    """Upstream matches a `Name@hash` selector EXACTLY (`ids.get(value)`).
+
+    `_selects` keeps only the hash half, which is right for the resolvers and wrong here: a
+    renamed project or a mistyped name is a genuine upstream failure, and prescribing "re-pin
+    with this same selector" is a retry that can never succeed.
+    """
+    _hb_file(tmp_path, h="c8adad95", name="Sandbox")
+    for selector in ("OldName@c8adad95", "sandbox@c8adad95"):
+        msg = make_result(payload=_fail(ERR_EXACT_MISS))
+        inote.annotate(msg, "set_active_instance", {"instance": selector},
+                       {"requested_instance": selector},
+                       directory=str(tmp_path), now=NOW)
+        assert _note(msg) == "", selector
+    # The correct spelling still resolves.
+    assert instances.find_heartbeat("Sandbox@c8adad95", str(tmp_path)) is not None
 
 
 def test_stale_heartbeat_claims_nothing_about_liveness(tmp_path):

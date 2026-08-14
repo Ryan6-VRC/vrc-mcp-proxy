@@ -46,6 +46,13 @@ NOT_FOUND_MARKERS = (
     "No Unity instances are currently connected",
     "not found. Use mcpforunity://instances",
     "does not match any running Unity editors",
+    # The PORT selector's miss, and it needs its own entry: the string is "No Unity instance
+    # found on port 6402. Available: …", which `not found. Available` below does NOT match
+    # ("found on port" breaks the substring). Port targeting is stdio-only — reachable ONLY
+    # through this proxy — and it is a documented form in upstream's own tool description, so
+    # missing it left the note silent on the measured case spelled the documented way.
+    # services/tools/set_active_instance.py + transport/unity_instance_middleware.py.
+    "No Unity instance found on port",
     # transport/unity_instance_middleware.py + transport/legacy/unity_connection.py
     "not found. Available",
     "No Unity Editor instances found",
@@ -54,6 +61,15 @@ NOT_FOUND_MARKERS = (
 # Upstream's reload grace, mirrored so the note can say which side of it the editor sits on.
 # Not imported from anywhere: it is a constant in upstream's Python, not a shared contract.
 UPSTREAM_RELOAD_GRACE_S = 60
+
+# How long `reloading` stays believable. Several times upstream's grace, because a real reload
+# routinely outruns 60s and the wait branch is the right answer throughout — but NOT forever.
+# `reloading:true` is written before the reload starts (StdioBridgeReloadHandler) and every
+# site that clears it needs a live process, so an Editor killed or crashed MID-reload leaves
+# the flag set permanently: exactly the regime where it is evidence of death rather than of
+# work in progress, since a reload that resumes rewrites it. Unbounded, the note would tell
+# the reader to wait forever and explicitly not to do the one thing that would help.
+RELOAD_WAIT_CEILING_S = 300
 
 
 def _failure_error_text(payload):
@@ -124,20 +140,35 @@ def note_text(hb, age_s, tool):
     head = (f"[vrc-mcp-proxy] {name} is in this machine's heartbeat directory with a "
             f"{age}-old heartbeat")
 
-    if hb.get("reloading"):
+    if hb.get("reloading") and age_s <= RELOAD_WAIT_CEILING_S:
+        # `reason` is carried here, not just in the fresh branch: the bridge also writes
+        # `reloading:true` with reason "port_busy" for a PORT CONFLICT, which is not a domain
+        # reload at all. Naming the reason rather than asserting "domain reload" keeps the
+        # note describing what it read.
+        reason = hb.get("reason")
+        what = f"reports `reloading` (reason `{reason}`)" if reason else "reports `reloading`"
         return (
-            f"{head}, and it reports `reloading`. Upstream resolves instances by a 0.3s "
-            f"framed ping and keeps a non-responding editor only while a reload is under "
-            f"{UPSTREAM_RELOAD_GRACE_S}s old, so a longer reload reads exactly like this. "
-            f"Do NOT re-pin in a loop — it will fail the same way until the reload "
-            f"finishes. Wait for the domain reload, then pin again.")
+            f"{head}, and it {what}. Upstream resolves instances by a 0.3s framed ping and "
+            f"keeps a non-responding editor only while that flag is set AND the heartbeat is "
+            f"under {UPSTREAM_RELOAD_GRACE_S}s old, so a longer reload reads exactly like "
+            f"this. Do NOT re-pin in a loop — it will fail the same way until the reload "
+            f"finishes. Wait for it, then pin again.")
 
     if age_s > UPSTREAM_RELOAD_GRACE_S:
+        # The stale branch offers the cheap action FIRST. The heartbeat is written from the
+        # main thread, so a heavy import or any other long block freezes it while the editor
+        # is perfectly alive — and there "go check the Editor" is the wasted trip this whole
+        # behavior exists to delete. A re-pin costs one call and settles it either way, so it
+        # is the right first move even though the proxy cannot promise it will work.
+        stuck = " and it has been reporting `reloading` throughout, which a resumed reload " \
+                "would have overwritten — treat that as a crash mid-reload, not as progress" \
+                if hb.get("reloading") else ""
         return (
-            f"{head}, which is stale enough that this proxy cannot tell you whether that "
-            f"editor is alive: the heartbeat is written from the main thread, so a blocked "
-            f"or closed editor looks the same from here. Read "
-            f"mcpforunity://instances, or check the Editor, before assuming either.")
+            f"{head}{stuck}, which is stale enough that this proxy cannot tell you whether "
+            f"that editor is alive: the heartbeat is written from the main thread, so an "
+            f"editor blocked on a long import looks identical to a closed one from here. "
+            f"Try one re-pin first — it costs a call and is the fix if the editor is merely "
+            f"blocked. Only if that fails is this worth reading as a dead editor.")
 
     reason = hb.get("reason")
     reason_clause = f" (reason `{reason}`)" if reason else ""
@@ -162,6 +193,12 @@ def annotate(msg, tool, args, info, directory=None, now=None):
     """
     text, _idx = first_text_payload(msg)
     if text is None:
+        return msg
+    # Cheap reject before parsing. This runs on EVERY tools/call response and the gate almost
+    # never fires, so the JSON parse is not worth paying for a marker that isn't there. It
+    # cannot admit a false positive on its own: the structural `success is False` + `error`
+    # gate below still decides, and this only ever skips work.
+    if not any(m in text for m in NOT_FOUND_MARKERS):
         return msg
     try:
         payload = json.loads(text)

@@ -140,12 +140,13 @@ def wrap_idempotent(code, guid=None):
     like a suppressed success while the caller's mutation has in fact not landed. The marker
     token itself stays: Atelier's `docs/unity.md` names it as the sign of a collapsed retry.
     Each branch strips the recorded state's own prefix, so a suppressed success does not read
-    "SUCCEEDED ... completed: 7". Those two prefixes and the `Substring` offsets that strip
-    them are one fact in two places — `_WRAP_TRAILER` writes "failed: " (8) and "completed: "
-    (11) — and nothing but `test_suppression_prefixes_match_their_substring_offsets` ties
-    them together. Rewording a prefix without its offset does not fail loudly: it mis-slices,
-    and on a short result throws ArgumentOutOfRangeException from INSIDE the returned
-    snippet, on every suppressed duplicate.
+    "SUCCEEDED ... completed: 7". The prefixes and the offsets that strip them are the same
+    Python constants (`_FAILED_PREFIX`, `_COMPLETED_PREFIX`) measured with `len()` at both
+    ends, so rewording one cannot desynchronize them — worth stating because the obvious
+    implementation, a literal prefix in the trailer and a hand-typed `Substring(11)` in the
+    preamble, fails silently rather than loudly: it mis-slices, and on a short recorded
+    result throws ArgumentOutOfRangeException from INSIDE the returned snippet, on every
+    suppressed duplicate.
 
     The re-verify burden is scoped to mutations rather than stated flat. It fires on ordinary
     short READS too (measured: three wear-test sightings, an ImportPackage.Verify pair among
@@ -153,11 +154,12 @@ def wrap_idempotent(code, guid=None):
     snippet from a reading one, and does not guess — it asks the caller, who wrote the
     snippet and always knows. That is not the same as ducking a fact the proxy could assert.
 
-    Generated C# stays ASCII — this text is the one place a client-side encoding slip would
-    land inside a diagnostic. It is also embedded by hand in a C# string literal rather than
-    routed through `csharp_literal`, so an inner `"` or a backslash in a reword produces
-    CS1010 on 100% of execute_code calls with the Python suite still green;
-    `test_wrap_preamble_is_balanced_csharp` is what stands between a reword and that.
+    The branch prose is interpolated through `csharp_literal`, so rewording it is safe:
+    inner quotes, backslashes and non-ASCII are escaped at the boundary rather than being a
+    trap for the next author. Write the constants above as ordinary prose — do NOT pre-escape
+    anything into them, or the escaping will be applied twice and the backslash will show up
+    in the diagnostic the agent reads. What still has to be hand-written correctly is the C#
+    skeleton around them, which is what `test_wrap_preamble_is_balanced_csharp` guards.
     """
     guid = f"vrcproxy:{uuid.uuid4()}" if guid is None else guid
     return _wrap_preamble(guid) + code + "\n" + _WRAP_TRAILER
@@ -411,14 +413,17 @@ AMBIGUITY_NOTE_TEXT = (
 # (`return ReportConsole.Read(5);` -> "The name `ReportConsole' does not exist"), not
 # EditorSceneManager. USING_REFUSAL_TEXT already names them for the same reason.
 UNRESOLVED_NAME_NOTE_TEXT = (
-    "[vrc-mcp-proxy] that name did not resolve. Two causes fire this identically, so check "
-    "them in order. (1) A type outside execute_code's six pre-imported namespaces (System, "
+    "[vrc-mcp-proxy] that name did not resolve. The two common causes here fire identically, "
+    "so check them in order. (1) A type outside execute_code's six pre-imported namespaces "
+    "(System, "
     "System.Collections.Generic, System.Linq, System.Reflection, UnityEngine, UnityEditor) "
     "used unqualified — the agent/avatar tool doors (Ryan6Vrc.AgentTools.Editor.<Tool>, "
     "Ryan6Vrc.AvatarTools.Editor.<Tool>) and UnityEditor.SceneManagement "
     "(EditorSceneManager, PrefabStageUtility) are the common ones; UnityEditor does not "
-    "bring its sub-namespaces with it. (2) A plain typo. If the name is already spelled "
-    "right and is either fully-qualified or inside those six namespaces, it is the typo "
+    "bring its sub-namespaces with it. (2) A plain typo. CS0103 also covers an out-of-scope "
+    "local and a name behind a disabled #if, so neither of those two is a certainty. If the "
+    "name is a TYPE, is already spelled right, and is either fully-qualified or inside those "
+    "six namespaces, it is the typo "
     "case — recheck it against the actual API rather than adding a namespace."
 )
 

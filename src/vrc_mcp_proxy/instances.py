@@ -184,10 +184,25 @@ def find_heartbeat(selector, directory=None):
     filtering it out here would throw away the fact the note is built to state. A stale
     match is still the right editor — the hash is `SHA1(dataPath)[:8]`, so hash -> path is
     total — and the note's own branching decides what a given age means.
+
+    A `Name@hash` selector is matched EXACTLY here, unlike `_selects`, which keeps only the
+    hash half. That leniency is right for the resolvers (they want the editor a hash names)
+    and wrong for this caller, because upstream is strict: `set_active_instance` does a
+    case-sensitive `ids.get(value)` on the whole `Name@hash`. So a selector with the right
+    hash and a wrong name — a typo, or a project renamed since the id was copied — is a
+    genuine upstream failure that `_selects` would happily resolve, and the note would then
+    prescribe "re-issue this same selector", a retry that can never succeed. Prescribing an
+    unbounded retry is the same defect the reload branch exists to avoid, reached from the
+    other side.
     """
     if not selector:
         return None
-    matches = [hb for hb in read_heartbeats(directory) if _selects(hb, selector)]
+    pool = read_heartbeats(directory)
+    if "@" in str(selector):
+        matches = [hb for hb in pool
+                   if f"{hb.get('project_name') or hb['hash']}@{hb['hash']}" == str(selector)]
+    else:
+        matches = [hb for hb in pool if _selects(hb, selector)]
     return matches[0] if len(matches) == 1 else None
 
 
