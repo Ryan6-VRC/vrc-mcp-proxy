@@ -43,7 +43,16 @@ def _parse_heartbeat(value):
 
 
 def read_heartbeats(directory=None):
-    """List of {hash, port, assets_path, project_root, project_name, last_heartbeat} for live Editors.
+    """List of {hash, port, assets_path, project_root, project_name, last_heartbeat, reloading, reason} for live Editors.
+
+    `reloading` and `reason` are carried for `instance_note`, which is the one consumer that
+    makes a claim about an Editor's *state* rather than just resolving a path from it. They
+    are exactly the two fields upstream's own discovery keys its keep-or-drop decision on
+    (`port_discovery.discover_all_unity_instances`: an instance whose 0.3s probe fails is
+    kept only while `reloading` is true AND the heartbeat is under 60s old), so reading them
+    is what lets the note tell "wait for the reload" apart from "re-pin". Both are written by
+    the bridge on every heartbeat (`StdioBridgeHost.WriteHeartbeat`); a status file missing
+    either reads as False/None and the note falls back to claiming nothing.
 
     One unreadable status file is skipped, never raised on — this function runs on BOTH
     relay paths (the `instance_guard` count on every tools/call, and `canonical_instance` +
@@ -81,6 +90,11 @@ def read_heartbeats(directory=None):
             "project_root": root,
             "project_name": data.get("project_name"),
             "last_heartbeat": _parse_heartbeat(data.get("last_heartbeat")),
+            # Coerced, not passed through: every other field here is read defensively for the
+            # reason this function's docstring gives, and a status file with `reloading: "yes"`
+            # must not make `if hb["reloading"]` mean something different from `is True`.
+            "reloading": data.get("reloading") is True,
+            "reason": data.get("reason") if isinstance(data.get("reason"), str) else None,
         })
     return out
 
@@ -160,6 +174,21 @@ def canonical_instance(selector, directory=None):
         return None
     hb = matches[0]
     return f"{hb['project_name'] or hb['hash']}@{hb['hash']}"
+
+
+def find_heartbeat(selector, directory=None):
+    """The single heartbeat `selector` names, or None if it names other than exactly one.
+
+    Unfiltered by freshness on purpose, and this is the opposite call from
+    `resolve_assets_path`'s: its consumer (`instance_note`) wants to *report* the age, so
+    filtering it out here would throw away the fact the note is built to state. A stale
+    match is still the right editor — the hash is `SHA1(dataPath)[:8]`, so hash -> path is
+    total — and the note's own branching decides what a given age means.
+    """
+    if not selector:
+        return None
+    matches = [hb for hb in read_heartbeats(directory) if _selects(hb, selector)]
+    return matches[0] if len(matches) == 1 else None
 
 
 def resolve_assets_path(per_call_instance, active_instance, directory=None, now=None):
