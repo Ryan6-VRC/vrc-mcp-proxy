@@ -102,6 +102,109 @@ def test_suppression_message_names_the_outcome_per_branch():
     assert code.isascii(), "generated C# must not carry non-ASCII into a diagnostic"
 
 
+def test_suppression_scopes_the_reverify_burden_to_mutations():
+    # The guard fires on ordinary short READS too — three wear-test sightings, an
+    # ImportPackage.Verify pair among them — where "verify on disk" is advice about
+    # nothing. The proxy cannot tell a mutating snippet from a reading one and must not
+    # guess, so the burden is handed to the caller, who wrote it and knows.
+    code = ec.wrap_idempotent("return 1;", guid="vrcproxy:fixed")
+    assert "only reads" in code
+    assert "just re-issue it" in code
+    assert "If it mutates" in code
+    # And the SUCCEEDED branch must not presuppose an intent to re-run: there the point is
+    # only that the text is a record, not proof of the state now.
+    assert "record of it" in code
+
+
+def _strip_csharp_literals(code):
+    """(code with every string literal removed, whether a literal was left open).
+
+    A real scanner rather than `code.split('"')`, because `csharp_literal` legitimately emits
+    `\\"` inside a literal and a naive split reads that as a literal boundary — which is how
+    the earlier version of this test ended up banning escapes outright.
+    """
+    out, in_literal, escaped = [], False, False
+    for ch in code:
+        if in_literal:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_literal = False
+        elif ch == '"':
+            in_literal = True
+        else:
+            out.append(ch)
+    return "".join(out), in_literal
+
+
+def test_wrap_preamble_is_balanced_csharp():
+    """A stray quote or backslash in a reword = CS1010 on 100% of execute_code calls.
+
+    These branch strings are hand-embedded in a C# string literal rather than routed
+    through `csharp_literal`, and nothing else in the suite would notice: every other
+    assertion here is a substring check that passes happily on syntactically broken C#.
+    """
+    # The prose is escaped at the boundary, so an inner quote or a non-ASCII character in a
+    # branch constant is LEGAL and must stay legal — an earlier version of this test banned
+    # every backslash in the preamble, which forbade exactly the `\"` and `\uXXXX` that
+    # `csharp_literal` emits, i.e. it outlawed the escaping it was meant to protect. What is
+    # actually fragile is the hand-written skeleton, so that is what gets asserted.
+    skeleton, unterminated = _strip_csharp_literals(
+        ec.wrap_idempotent("return 1;", guid="vrcproxy:fixed"))
+    assert not unterminated, "a string literal in the generated C# is never closed"
+    assert "\\" not in skeleton, (
+        "a backslash OUTSIDE a string literal is not an escape — the skeleton is broken")
+    # Brackets balance across the WHOLE wrap, never the preamble alone: the preamble
+    # deliberately ends mid-expression, opening the `((System.Func<object>)(() => {` that
+    # `_WRAP_TRAILER` closes around the caller's code. Counted on the skeleton, so the
+    # "(null)" inside the success branch's prose cannot register as an unclosed paren.
+    for opener, closer in (("(", ")"), ("{", "}")):
+        assert skeleton.count(opener) == skeleton.count(closer), (
+            f"unbalanced {opener}{closer} in generated C#")
+
+
+def test_branch_prose_is_routed_through_csharp_literal():
+    # The guarantee the docstring makes. If someone hand-embeds a branch string again, the
+    # escaping stops applying and a reworded quote is CS1010 on every execute_code call.
+    preamble = ec._wrap_preamble("vrcproxy:fixed")
+    for const in (ec._SUPPRESSED_HEAD, ec._SUPPRESSED_RUNNING, ec._SUPPRESSED_FAILED,
+                  ec._SUPPRESSED_SUCCEEDED):
+        assert ec.csharp_literal(const) in preamble
+
+
+def test_rewording_a_branch_with_a_quote_or_em_dash_stays_valid(monkeypatch):
+    # The reword this indirection exists to make safe — an em dash is this repo's house
+    # prose style, and it used to fail the balance test above.
+    monkeypatch.setattr(ec, "_SUPPRESSED_FAILED",
+                        'That run FAILED — your "work" did NOT land: ')
+    skeleton, unterminated = _strip_csharp_literals(
+        ec.wrap_idempotent("return 1;", guid="vrcproxy:fixed"))
+    assert not unterminated
+    assert "\\" not in skeleton
+    assert ec.wrap_idempotent("return 1;", guid="g").isascii()
+
+
+def test_suppression_prefixes_match_their_substring_offsets():
+    """The trailer writes the prefixes; the preamble slices them off by length.
+
+    One fact in two places, and rewording a prefix without its offset fails silently rather
+    than loudly: it mis-slices, and on a short recorded result throws
+    ArgumentOutOfRangeException from inside the returned snippet, on every suppressed
+    duplicate. Nothing tied these together before.
+    """
+    preamble = ec._wrap_preamble("vrcproxy:fixed")
+    trailer = ec._WRAP_TRAILER
+    for prefix in ('"failed: "', '"completed: "'):
+        assert prefix in trailer, f"trailer no longer writes {prefix}"
+        assert f"Substring({len(prefix) - 2})" in preamble, (
+            f"{prefix} is {len(prefix) - 2} chars; the preamble slices a different length")
+    # The null sentinel is compared whole, so it has no offset — but it must still exist on
+    # both sides or the success branch returns the raw sentinel text to the caller.
+    assert '"completed(null)"' in trailer and '"completed(null)"' in preamble
+
+
 def test_guard_records_failure_and_rethrows_on_exception():
     # A throwing snippet must NOT erase the key. Erasing re-arms the guard: the next queued
     # copy reads "" and re-runs the body in full, so a build that mutates state and then
@@ -400,8 +503,63 @@ def test_type_note_states_the_condition_and_does_not_assert_the_cause():
 
 
 def test_unrelated_compile_error_earns_no_trap_note():
+    # This used CS0103 ("The name 'Foo' does not exist…") as its unrelated example until the
+    # unresolved-name trap shipped — which is what made it a trap in the first place: the
+    # commonest annotatable compile failure in this workspace, with no note on it. Replaced
+    # with errors no trap claims.
+    assert ec.compile_notes(["Line 12: ; expected"]) == []
     assert ec.compile_notes(
-        ["Line 12: The name 'Foo' does not exist in the current context"]) == []
+        ["Line 12: Cannot implicitly convert type 'int' to 'string'"]) == []
+
+
+# --- unresolved name (CS0103) ---------------------------------------------
+# Both VERBATIM from AvatarProject, 2026-08-13. The dialects differ only in how they quote
+# the name, so ONE key spans both — which is the thing worth pinning: two per-dialect
+# assertions would both pass against an implementation that shipped only the roslyn
+# spelling, because the suffix is byte-identical.
+ROSLYN_UNRESOLVED = ["Line 12: The name 'EditorSceneManager' does not exist in the "
+                     "current context"]
+CODEDOM_UNRESOLVED = ["Line 14: The name `ReportConsole' does not exist in the "
+                      "current context"]
+
+
+def test_unresolved_name_note_fires_on_both_dialects_from_one_key():
+    for errors in (ROSLYN_UNRESOLVED, CODEDOM_UNRESOLVED):
+        assert ec.compile_notes(errors) == [ec.UNRESOLVED_NAME_NOTE_TEXT], errors
+    # The invariant a per-dialect test would miss: one key, matching both measured strings.
+    assert all(ec._UNRESOLVED_NAME in e
+               for e in ROSLYN_UNRESOLVED + CODEDOM_UNRESOLVED)
+
+
+def test_unresolved_name_key_does_not_reach_the_other_traps():
+    # Shortening the key to `in the current context` would drift into
+    # _TYPE_IN_VALUE_POSITION's "not valid in the given context" neighbourhood.
+    for errors in (ROSLYN_TYPE_IN_VALUE, CODEDOM_TYPE_IN_VALUE,
+                   ROSLYN_AMBIGUOUS, CODEDOM_AMBIGUOUS, ROSLYN_RANDOM):
+        assert all(ec._UNRESOLVED_NAME not in e for e in errors), errors
+
+
+def test_unresolved_name_note_reads_correctly_on_a_typo():
+    # CS0103 fires identically on a misspelling (measured in the same snippet as the
+    # namespace case), so the note must hand the typo reader an exit rather than sending
+    # them to fully-qualify a name that is simply wrong.
+    text = ec.UNRESOLVED_NAME_NOTE_TEXT
+    assert "typo" in text
+    assert "spelled right" in text
+    # And it must name the doors that dominate this workspace's traffic, not only the
+    # UnityEditor sub-namespace.
+    assert "Ryan6Vrc.AgentTools.Editor" in text
+    assert "UnityEditor.SceneManagement" in text
+
+
+def test_ambiguity_and_unresolved_name_coexist_as_two_notes():
+    # Measured: a CS0104 cascades into "does not contain a definition for", never CS0103, so
+    # a response carrying both traps carries two genuine mistakes on different lines and
+    # two notes is right. No mutual exclusion is wired in, and this pins that.
+    notes = ec.compile_notes(ROSLYN_AMBIGUOUS + ROSLYN_UNRESOLVED)
+    assert notes == [ec.AMBIGUITY_NOTE_TEXT, ec.UNRESOLVED_NAME_NOTE_TEXT]
+    # The codedom ambiguity cascade itself must NOT earn an unresolved-name note.
+    assert ec.compile_notes(CODEDOM_AMBIGUOUS) == [ec.AMBIGUITY_NOTE_TEXT]
 
 
 def test_annotate_writes_both_surfaces():

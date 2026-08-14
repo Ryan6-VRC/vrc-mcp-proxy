@@ -83,6 +83,72 @@ def test_active_instance_not_committed_on_error():
     assert p.active_instance is None
 
 
+# --- the failure upstream reports in the PAYLOAD, not the envelope ----------
+def _pin_failure_payload(instance="Foo@abc"):
+    """Upstream's real shape for a missed pin: success:false, and NO isError.
+
+    `services/tools/set_active_instance.py` returns a plain dict, so FastMCP serializes it
+    as an ordinary successful tool result and `is_error_result` sees nothing wrong with it.
+    """
+    return {"success": False,
+            "error": f"Instance '{instance}' not found. Use mcpforunity://instances to "
+                     f"copy an exact Name@hash."}
+
+
+def test_active_instance_not_committed_when_the_payload_reports_failure():
+    # Before this gate the pin committed here, so the session read as pinned while upstream
+    # was not: instance_guard went quiet (active_instance truthy) and the venue guard
+    # resolved and emitted against a venue upstream was not routing to.
+    p = _proxy(_all_off())
+    p.handle_client_line(_set_active_request(1, "Foo@abc"))
+    p.handle_child_line(make_result_line(1, payload=_pin_failure_payload()))
+    assert p.active_instance is None
+
+
+def test_failed_pin_carries_no_proxy_project_root():
+    # The live sighting had `proxy_project_root` on the FAILED response, naming a venue
+    # upstream was not routed to — the same defect seen from the caller's side.
+    cfg = _all_off()
+    cfg["proxy_project_root"] = True
+    p = _proxy(cfg)
+    p.handle_client_line(_set_active_request(1, "Foo@abc"))
+    p.handle_child_line(make_result_line(1, payload=_pin_failure_payload()))
+    assert all("proxy_project_root" not in line for line in p.client_out.lines)
+
+
+def test_a_success_with_non_json_text_still_commits():
+    """The direction that strands a session, uncovered until now.
+
+    `_payload_reports_failure` may only ever WITHHOLD a commit. If it read an unparseable
+    payload as failure, a legitimate pin would never commit, `instance_guard` would refuse
+    every later call, and its advice ("pin one with set_active_instance") would name the
+    thing that had just silently failed.
+    """
+    p = _proxy(_all_off())
+    p.handle_client_line(_set_active_request(1, "Foo@abc"))
+    p.handle_child_line(make_result_line(1, text="not json at all"))
+    assert p.active_instance == "Foo@abc"
+
+
+def test_a_success_with_no_success_key_still_commits():
+    # Absent is not False: keying on `is not True` would break every payload shape that
+    # simply does not carry the field.
+    p = _proxy(_all_off())
+    p.handle_client_line(_set_active_request(1, "Foo@abc"))
+    p.handle_child_line(make_result_line(1, payload={"ok": True}))
+    assert p.active_instance == "Foo@abc"
+
+
+def test_a_wrapped_success_payload_still_commits():
+    p = _proxy(_all_off())
+    p.handle_client_line(_set_active_request(1, "Foo@abc"))
+    p.handle_child_line(make_result_line(
+        1, payload={"success": True, "message": "Active instance set to Foo@abc"},
+        structured={"result": {"success": True,
+                               "message": "Active instance set to Foo@abc"}}))
+    assert p.active_instance == "Foo@abc"
+
+
 # --- hardening B: loud stderr on a duplicate in-flight id ------------------
 def test_duplicate_in_flight_id_logs():
     logs = []
@@ -132,6 +198,43 @@ def _guard_cfg():
     cfg["instance_guard"] = True
     cfg["proxy_project_root"] = True
     return cfg
+
+
+def _pin_miss_line(rid, instance):
+    return make_result_line(rid, payload={
+        "success": False,
+        "error": f"Instance '{instance}' not found. Use mcpforunity://instances to copy "
+                 f"an exact Name@hash."})
+
+
+def test_instance_not_found_note_is_wired_through_the_relay(tmp_path, monkeypatch):
+    # The note reads the heartbeat directory at response time, so this is the only place the
+    # `info` plumbing (requested_instance, and `.get` on every key) is exercised end to end.
+    monkeypatch.setattr(instances, "DEFAULT_DIR", str(tmp_path))
+    _write_hb(tmp_path, "aaaa1111", 6401, "C:/proj/One", "One")
+    cfg = _all_off()
+    cfg["instance_not_found_note"] = True
+    p = _proxy(cfg)
+
+    p.handle_client_line(_set_active_request(1, "One@aaaa1111"))
+    p.handle_child_line(_pin_miss_line(1, "One@aaaa1111"))
+
+    note = json.loads(p.client_out.lines[-1])["result"]["structuredContent"][
+        "proxy_transport_note"]
+    assert "One@aaaa1111" in note
+    assert "bare re-pin is the cure" in note
+    assert p.active_instance is None  # and the failed pin still did not commit
+
+
+def test_instance_not_found_note_respects_its_disable_switch(tmp_path, monkeypatch):
+    monkeypatch.setattr(instances, "DEFAULT_DIR", str(tmp_path))
+    _write_hb(tmp_path, "aaaa1111", 6401, "C:/proj/One", "One")
+    p = _proxy(_all_off())  # instance_not_found_note False
+
+    p.handle_client_line(_set_active_request(1, "One@aaaa1111"))
+    p.handle_child_line(_pin_miss_line(1, "One@aaaa1111"))
+
+    assert all("re-pin" not in line for line in p.client_out.lines)
 
 
 def test_instance_guard_refuses_unpinned_two_live(tmp_path, monkeypatch):

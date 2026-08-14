@@ -38,6 +38,7 @@ from .envelope import (
 )
 from .transforms import (
     execute_code,
+    instance_note,
     manage_asset,
     manage_camera,
     manage_gameobject,
@@ -56,6 +57,34 @@ WATCHDOG_NOTE = (
     "mutated, verify on disk before re-running. If codedom rejects the syntax (C#7+) or "
     "you can't safely re-run, restart the editor — the hang is per-editor Roslyn state."
 )
+
+
+def _payload_reports_failure(msg):
+    """True only when a tools/call payload positively says `success: false`.
+
+    Upstream reports a failed `set_active_instance` in the PAYLOAD while the envelope stays
+    clean, which `envelope.is_error_result` (top-level `error`, `result.isError`) cannot see.
+    This lives here rather than in envelope.py deliberately: that module owns envelope
+    *shape*, and every payload-semantic read in this codebase is call-site-local
+    (`execute_code._compile_error_lines`, the `proxy_project_root` write just below).
+
+    Both directions are load-bearing and only one of them is obvious.
+
+      * `success is False`, never `is not True`. Plenty of payloads carry no `success` key at
+        all, and treating "absent" as failure would silently stop committing legitimate pins.
+      * Unparseable => False, i.e. NOT a failure. This gate can only ever *withhold* a
+        commit, so a helper that failed closed on a missing or non-JSON payload would leave
+        `active_instance` permanently None and every later call refused by `instance_guard`
+        with advice that cannot work. Declining to read is not evidence of failure.
+    """
+    text, _idx = first_text_payload(msg)
+    if text is None:
+        return False
+    try:
+        payload = json.loads(text)
+    except (ValueError, TypeError):
+        return False
+    return isinstance(payload, dict) and payload.get("success") is False
 
 
 def _watchdog_note(threshold_s):
@@ -511,9 +540,17 @@ class Proxy:
         """
         name, args = info["tool"], info["args"]
         try:
-            # Commit a set_active_instance only once its response comes back successful.
+            # Commit a set_active_instance only once its response comes back successful —
+            # and upstream reports THIS failure in the payload, not the envelope, so
+            # `is_error_result` alone is not the gate. Measured: a miss returns
+            # `{"success": false, "error": "Instance '…' not found…"}` with no `isError`, so
+            # the pin was committed here on a call that pinned nothing upstream
+            # (`set_active_instance.py` calls `middleware.set_active_instance` only on its
+            # two success returns). The session then reads as pinned while upstream is not:
+            # `instance_guard` goes quiet because `active_instance` is truthy, and the venue
+            # guard resolves and emits against a venue upstream is not routing to.
             if name == "set_active_instance" and info.get("requested_instance") is not None \
-                    and not is_error_result(msg):
+                    and not is_error_result(msg) and not _payload_reports_failure(msg):
                 # Store the pin CANONICALLY (Name@hash). A bare-port pin left raw would put
                 # every later venue resolve on the freshness-filtered arm for the whole
                 # session — see instances.canonical_instance. Unresolvable: keep the raw
@@ -589,6 +626,14 @@ class Proxy:
                     # the same stale-premise class the paired atelier PR is fixing in
                     # unity.md.)
                     prelude_lines=info.get("prelude_lines") or 0)
+            if self.cfg.get("instance_not_found_note", True):
+                # Reads the heartbeat directory, so it is the one note here that can raise on
+                # a filesystem fault — and this region is SHARED, so a raise costs every note
+                # on the response, not just this one. `instances.read_heartbeats` already
+                # swallows per-file errors, and `instance_note` reads `info` with `.get`
+                # throughout (the watchdog tombstone carries none of these keys).
+                msg = instance_note.annotate(
+                    msg, name, args, info, now=datetime.now(timezone.utc))
             if self.cfg.get("timeout_notes", True):
                 msg = timeouts.annotate(msg)
         except Exception as exc:  # noqa: BLE001 - contained region: advisory
@@ -596,7 +641,8 @@ class Proxy:
             # both only append, so no single label could name this region honestly at
             # per-behavior granularity — one of several reasons containment is per REGION.
             raise TransformFailure("response notes (inactive-target, compile traps, "
-                                   "prelude offset, timeout)", "advisory", exc) from exc
+                                   "prelude offset, instance-not-found, timeout)",
+                                   "advisory", exc) from exc
         return msg
 
     def _rewrite_venue_misroute(self, msg, info, name, args):

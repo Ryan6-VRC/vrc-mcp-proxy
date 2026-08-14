@@ -39,6 +39,7 @@ BEHAVIORS = (
     # what F7 forbids (transforms/execute_code.py records it for the venue/idempotency pair).
     "execute_code_compile_notes",
     "execute_code_prelude_offset_note",
+    "instance_not_found_note",
 )
 
 

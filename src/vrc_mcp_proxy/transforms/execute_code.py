@@ -11,7 +11,8 @@ Request-side:
 
 Response-side (both advisory notes, neither rewrites a payload — see the block above
 `_ERROR_LINE`):
-  * compile notes: name the fix for two compile traps lifted out of `docs/unity.md`.
+  * compile notes: name the fix for three compile traps — two lifted out of `docs/unity.md`,
+    plus the unresolved-name trap that doc never described.
   * prelude offset note: disclose that the reported line numbers count the lines the
     request side injected, and how to read the two bands that are not the caller's at all.
 """
@@ -62,6 +63,9 @@ USING_REFUSAL_TEXT = (
     "execute_code runs your snippet as a method body — using directives cannot appear "
     "there. Remove them and fully-qualify; pre-imported: System, "
     "System.Collections.Generic, System.Linq, System.Reflection, UnityEngine, UnityEditor. "
+    "That list is exhaustive, and UnityEditor does NOT bring its sub-namespaces with it: "
+    "UnityEditor.SceneManagement (EditorSceneManager, PrefabStageUtility) is the one that "
+    "bites, so write it out in full. "
     "The agent/avatar tool doors are NOT pre-imported — fully-qualify each call with its "
     "type namespace: Ryan6Vrc.AgentTools.Editor.<Tool> (agent-tools) or "
     "Ryan6Vrc.AvatarTools.Editor.<Tool> (avatar-tools)."
@@ -70,6 +74,33 @@ USING_REFUSAL_TEXT = (
 
 def has_top_level_using(code):
     return bool(_USING_DIRECTIVE.search(code or ""))
+
+
+def csharp_literal(value):
+    """A C# double-quoted string literal for `value`, escaped and ASCII-only.
+
+    Two constraints meet here and only escaping satisfies both. The path is interpolated
+    into generated C#, so a `"` or `\\` in it would break the snippet (a project path can
+    hold either). And generated C# stays ASCII: CodeDom round-trips the source through a
+    temp file, and a non-ASCII path that survives the wire but mangles there yields a
+    literal differing from `Application.dataPath` by exactly the mangled characters — a
+    permanent, causeless false refusal in that project. `\\uXXXX` (`\\UXXXXXXXX` past the
+    BMP) makes the encoding question moot rather than betting on it.
+    """
+    out = []
+    for ch in value:
+        code = ord(ch)
+        if ch == '"':
+            out.append('\\"')
+        elif ch == "\\":
+            out.append("\\\\")
+        elif 0x20 <= code <= 0x7E:
+            out.append(ch)
+        elif code <= 0xFFFF:
+            out.append("\\u%04x" % code)
+        else:
+            out.append("\\U%08x" % code)
+    return '"' + "".join(out) + '"'
 
 
 def wrap_idempotent(code, guid=None):
@@ -109,11 +140,64 @@ def wrap_idempotent(code, guid=None):
     like a suppressed success while the caller's mutation has in fact not landed. The marker
     token itself stays: Atelier's `docs/unity.md` names it as the sign of a collapsed retry.
     Each branch strips the recorded state's own prefix, so a suppressed success does not read
-    "SUCCEEDED ... completed: 7". Generated C# stays ASCII — this text is the one place a
-    client-side encoding slip would land inside a diagnostic.
+    "SUCCEEDED ... completed: 7". The prefixes and the offsets that strip them are the same
+    Python constants (`_FAILED_PREFIX`, `_COMPLETED_PREFIX`) measured with `len()` at both
+    ends, so rewording one cannot desynchronize them — worth stating because the obvious
+    implementation, a literal prefix in the trailer and a hand-typed `Substring(11)` in the
+    preamble, fails silently rather than loudly: it mis-slices, and on a short recorded
+    result throws ArgumentOutOfRangeException from INSIDE the returned snippet, on every
+    suppressed duplicate.
+
+    The re-verify burden is scoped to mutations rather than stated flat. It fires on ordinary
+    short READS too (measured: three wear-test sightings, an ImportPackage.Verify pair among
+    them), where "verify on disk" is advice about nothing. The proxy cannot tell a mutating
+    snippet from a reading one, and does not guess — it asks the caller, who wrote the
+    snippet and always knows. That is not the same as ducking a fact the proxy could assert.
+
+    The branch prose is interpolated through `csharp_literal`, so rewording it is safe:
+    inner quotes, backslashes and non-ASCII are escaped at the boundary rather than being a
+    trap for the next author. Write the constants above as ordinary prose — do NOT pre-escape
+    anything into them, or the escaping will be applied twice and the backslash will show up
+    in the diagnostic the agent reads. What still has to be hand-written correctly is the C#
+    skeleton around them, which is what `test_wrap_preamble_is_balanced_csharp` guards.
     """
     guid = f"vrcproxy:{uuid.uuid4()}" if guid is None else guid
     return _wrap_preamble(guid) + code + "\n" + _WRAP_TRAILER
+
+
+# The suppression message's four pieces, as ORDINARY PYTHON PROSE. They are interpolated
+# into generated C# through `csharp_literal`, never pasted into a hand-written C# literal,
+# and that indirection is the whole point: embedded by hand, a reword containing an inner
+# quote silently produces CS1010 on 100% of execute_code calls with the Python suite green,
+# and it does not even have to unbalance the quote count — `"That run "SUCCEEDED""` reads as
+# even. Escaping at the boundary retires the class instead of testing for it, the same way
+# the venue path is handled.
+#
+# Read these as the diagnostic they are (tool-design.md: agent-facing strings are governed
+# prose). The re-verify burden is scoped to mutations because the guard fires on ordinary
+# short READS too — three wear-test sightings, an ImportPackage.Verify pair among them —
+# where "verify on disk" is advice about nothing. The proxy cannot tell a mutating snippet
+# from a reading one and must not guess, so it asks the caller, who wrote it and knows.
+_SUPPRESSED_HEAD = ("[proxy-duplicate-suppressed] upstream re-delivered this call; "
+                    "it ran exactly once. ")
+_SUPPRESSED_RUNNING = (
+    "That run has not returned, so its outcome is unknown. If your snippet only reads, "
+    "just re-issue it. If it mutates, verify on disk before you rely on running it again.")
+_SUPPRESSED_FAILED = (
+    "That run FAILED, so your work did NOT land. This is that failure, not a suppressed "
+    "success: ")
+# Deliberately not "…before re-running": on this branch the caller may have no intention of
+# re-running, and the fact that matters is that the text is a RECORD rather than a live read.
+_SUPPRESSED_SUCCEEDED = (
+    "That run SUCCEEDED and this text is the record of it, which is your result: ")
+
+# The two prefixes `_WRAP_TRAILER` writes, and the offsets the preamble strips them with.
+# Derived, never typed twice: a reworded prefix whose `Substring` was not updated mis-slices,
+# and on a short recorded result throws ArgumentOutOfRangeException from inside the returned
+# snippet on every suppressed duplicate — silent, not loud.
+_FAILED_PREFIX = "failed: "
+_COMPLETED_PREFIX = "completed: "
+_COMPLETED_NULL = "completed(null)"
 
 
 def _wrap_preamble(guid):
@@ -124,19 +208,24 @@ def _wrap_preamble(guid):
     than asserting a constant beside it. A constant would be a second copy of a fact only
     this function owns, and its drift would be silent — a wrong line number in a diagnostic
     reads exactly like a right one.
+
+    Kept at six lines. The message text is one emitted line however long the prose gets, so
+    rewording the constants above cannot move the offset; only adding a STATEMENT can.
     """
     return (
         f'var __a10k = "{guid}";\n'
         'var __a10prev = UnityEditor.SessionState.GetString(__a10k, "");\n'
-        'if (__a10prev != "") return "[proxy-duplicate-suppressed] upstream re-delivered '
-        'this call; it ran exactly once. " + (__a10prev == "running" '
-        '? "That run has not returned, so its outcome is unknown: verify on disk before '
-        'you re-run anything." '
-        ': __a10prev.StartsWith("failed: ") '
-        '? "That run FAILED, so your work did NOT land. This is that failure, not a '
-        'suppressed success: " + __a10prev.Substring(8) '
-        ': "That run SUCCEEDED and this is its result, which is your result: " '
-        '+ (__a10prev == "completed(null)" ? "null" : __a10prev.Substring(11)));\n'
+        'if (__a10prev != "") return ' + csharp_literal(_SUPPRESSED_HEAD)
+        + ' + (__a10prev == "running" '
+        '? ' + csharp_literal(_SUPPRESSED_RUNNING) + ' '
+        ': __a10prev.StartsWith(' + csharp_literal(_FAILED_PREFIX) + ') '
+        '? ' + csharp_literal(_SUPPRESSED_FAILED)
+        + f' + __a10prev.Substring({len(_FAILED_PREFIX)}) '
+        ': ' + csharp_literal(_SUPPRESSED_SUCCEEDED)
+        + ' + (__a10prev == ' + csharp_literal(_COMPLETED_NULL) + ' ? "null" '
+        # Three closers: Substring's own, the completed(null) ternary's, and the outer
+        # `(__a10prev == "running"` group opened at the head of this expression.
+        + f': __a10prev.Substring({len(_COMPLETED_PREFIX)})));\n'
         'UnityEditor.SessionState.SetString(__a10k, "running");\n'
         'object __a10r;\n'
         'try { __a10r = ((System.Func<object>)(() => {\n'
@@ -150,9 +239,10 @@ def _wrap_preamble(guid):
 _WRAP_TRAILER = (
     'return null; }))(); }\n'
     'catch (System.Exception __a10e) { UnityEditor.SessionState.SetString(__a10k, '
-    '"failed: " + __a10e.Message); throw; }\n'
-    'UnityEditor.SessionState.SetString(__a10k, __a10r == null ? "completed(null)" : '
-    '"completed: " + __a10r.ToString());\n'
+    + csharp_literal(_FAILED_PREFIX) + ' + __a10e.Message); throw; }\n'
+    'UnityEditor.SessionState.SetString(__a10k, __a10r == null ? '
+    + csharp_literal(_COMPLETED_NULL) + ' : '
+    + csharp_literal(_COMPLETED_PREFIX) + ' + __a10r.ToString());\n'
     'return __a10r;'
 )
 
@@ -177,32 +267,6 @@ def prelude_line_count(cfg, assets_path):
 
 VENUE_MISROUTE_MARKER = "[proxy-venue-misroute]"
 
-
-def csharp_literal(value):
-    """A C# double-quoted string literal for `value`, escaped and ASCII-only.
-
-    Two constraints meet here and only escaping satisfies both. The path is interpolated
-    into generated C#, so a `"` or `\\` in it would break the snippet (a project path can
-    hold either). And generated C# stays ASCII: CodeDom round-trips the source through a
-    temp file, and a non-ASCII path that survives the wire but mangles there yields a
-    literal differing from `Application.dataPath` by exactly the mangled characters — a
-    permanent, causeless false refusal in that project. `\\uXXXX` (`\\UXXXXXXXX` past the
-    BMP) makes the encoding question moot rather than betting on it.
-    """
-    out = []
-    for ch in value:
-        code = ord(ch)
-        if ch == '"':
-            out.append('\\"')
-        elif ch == "\\":
-            out.append("\\\\")
-        elif 0x20 <= code <= 0x7E:
-            out.append(ch)
-        elif code <= 0xFFFF:
-            out.append("\\u%04x" % code)
-        else:
-            out.append("\\U%08x" % code)
-    return '"' + "".join(out) + '"'
 
 
 def venue_guard(assets_path):
@@ -319,11 +383,48 @@ _AMBIGUOUS = "is an ambiguous reference"
 _TYPE_IN_VALUE_POSITION = ("is a type, which is not valid in the given context",
                            "is a `type' but a `variable' was expected")
 
+# A name that resolved to nothing (CS0103). ONE key, not a dialect pair like the two above:
+# measured on a live Editor (AvatarProject, 2026-08-13), the dialects differ only in how they
+# quote the name, and the suffix is byte-identical —
+#   roslyn : Line 12: The name 'EditorSceneManager' does not exist in the current context
+#   codedom: Line 12: The name `EditorSceneManager' does not exist in the current context
+# Kept as the FULL suffix. Shortened to `in the current context` it would sit one word away
+# from `_TYPE_IN_VALUE_POSITION`'s "not valid in the given context" family and start
+# annotating a different error with the wrong note.
+_UNRESOLVED_NAME = "does not exist in the current context"
+
 AMBIGUITY_NOTE_TEXT = (
     "[vrc-mcp-proxy] that ambiguity is execute_code's own: it pre-imports six namespaces "
     "together, so a name two of them both define resolves to neither. The error above "
     "names the pair — fully-qualify the one you meant (UnityEngine.Object.DestroyImmediate, "
     "UnityEngine.Random.Range). Object and Random are the two that bite in practice."
+)
+
+# Names BOTH conditions and refuses to pick between them, because CS0103 fires identically
+# on a typo and on an unqualified type — measured in one snippet, `EditorSceneManager` and
+# `someNameThatDoesNotExist` produced the same error shape. An earlier draft named only the
+# namespace fix, which would send a reader with a misspelling off to "fully-qualify" a typo,
+# fail again, and spend the round trip this note exists to save. Naming two conditions is
+# still asserting a state; it is the CAUSE that must not be inferred (tool-design.md
+# §Lifting's second condition).
+#
+# The tool doors lead the namespace list on measured frequency, not tidiness: the commonest
+# unresolved name in this workspace's traffic is a bare agent-tools/avatar-tools call
+# (`return ReportConsole.Read(5);` -> "The name `ReportConsole' does not exist"), not
+# EditorSceneManager. USING_REFUSAL_TEXT already names them for the same reason.
+UNRESOLVED_NAME_NOTE_TEXT = (
+    "[vrc-mcp-proxy] that name did not resolve. The two common causes here fire identically, "
+    "so check them in order. (1) A type outside execute_code's six pre-imported namespaces "
+    "(System, "
+    "System.Collections.Generic, System.Linq, System.Reflection, UnityEngine, UnityEditor) "
+    "used unqualified — the agent/avatar tool doors (Ryan6Vrc.AgentTools.Editor.<Tool>, "
+    "Ryan6Vrc.AvatarTools.Editor.<Tool>) and UnityEditor.SceneManagement "
+    "(EditorSceneManager, PrefabStageUtility) are the common ones; UnityEditor does not "
+    "bring its sub-namespaces with it. (2) A plain typo. CS0103 also covers an out-of-scope "
+    "local and a name behind a disabled #if, so neither of those two is a certainty. If the "
+    "name is a TYPE, is already spelled right, and is either fully-qualified or inside those "
+    "six namespaces, it is the typo "
+    "case — recheck it against the actual API rather than adding a namespace."
 )
 
 TYPE_IN_VALUE_POSITION_NOTE_TEXT = (
@@ -374,12 +475,22 @@ def compile_notes(errors):
     One note per distinct trap, never per matching line: one mistake yields two errors on
     both compilers (roslyn adds "cannot be accessed with an instance reference", codedom
     adds its own consequence line), and two identical notes would read as two problems.
+
+    Two DIFFERENT notes on one response is a separate question, and it was measured rather
+    than reasoned about, because a cascade would make them contradictory — "two namespaces
+    define this" beside "this resolved to nothing" about the same name. It does not happen:
+    under CodeDom an ambiguity cascades into `does not contain a definition for`, never
+    CS0103 (`Random.Range` -> the CS0104 plus "`System.Random' does not contain a definition
+    for `Range'"). A snippet earning both notes made both mistakes, on different lines, and
+    two notes is then the right answer — so no mutual exclusion is wired in.
     """
     notes = []
     if any(_AMBIGUOUS in e for e in errors):
         notes.append(AMBIGUITY_NOTE_TEXT)
     if any(frag in e for e in errors for frag in _TYPE_IN_VALUE_POSITION):
         notes.append(TYPE_IN_VALUE_POSITION_NOTE_TEXT)
+    if any(_UNRESOLVED_NAME in e for e in errors):
+        notes.append(UNRESOLVED_NAME_NOTE_TEXT)
     return notes
 
 
