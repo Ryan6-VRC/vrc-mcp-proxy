@@ -697,3 +697,140 @@ def test_prelude_count_zero_off_eleven_pinned_six_unresolved():
     assert ec.prelude_line_count(on, "C:/proj/One/Assets") == 11
     # Enabled-but-unresolved: the configuration a cfg-derived count would get wrong.
     assert ec.prelude_line_count(on, None) == 6
+
+
+# --- no-such-member note (CS0117 / CS1061) ---------------------------------
+#
+# Every error string below is copied from a live Editor (Sandbox, 2026-08-14), not
+# reconstructed: the receiver's form differs by dialect in a way that decides whether the
+# note can fire at all, and a hand-written fixture would have agreed with the wrong reading.
+CENSUS = {"ReportConsole": {"Ryan6Vrc.AgentTools.Editor.ReportConsole"},
+          "CompileController": {"Ryan6Vrc.AgentTools.Editor.CompileController"},
+          "UploadAvatar": {"Ryan6Vrc.AvatarTools.Editor.UploadAvatar"}}
+
+ROSLYN_MISS = "Line 12: 'ReportConsole' does not contain a definition for 'NoSuchDoor'"
+CODEDOM_MISS = ("Line 12: `UnityEditor.AssetDatabase' does not contain a definition for "
+                "`NoSuchMethodHere'")
+CODEDOM_KIT_MISS = ("Line 12: `Ryan6Vrc.AgentTools.Editor.ReportConsole' does not contain "
+                    "a definition for `NoSuchDoor'")
+# CodeDom prefixes the instance/extension arm with `Type ` and appends its own tail.
+CODEDOM_TYPE_PREFIXED = ("Line 13: Type `string' does not contain a definition for "
+                         "`NoSuchExtensionThing' and no extension method "
+                         "`NoSuchExtensionThing' of type `string' could be found. Are you "
+                         "missing an assembly reference?")
+ROSLYN_INSTANCE_MISS = ("Line 13: 'string' does not contain a definition for "
+                        "'NoSuchExtensionThing' and no accessible extension method "
+                        "'NoSuchExtensionThing' accepting a first argument of type 'string' "
+                        "could be found (are you missing a using directive or an assembly "
+                        "reference?)")
+
+
+def test_no_such_member_note_fires_on_both_dialects():
+    for line in (ROSLYN_MISS, CODEDOM_KIT_MISS):
+        note = ec.no_such_member_note([line], CENSUS)
+        assert note and "ReportConsole" in note
+        assert "Ryan6Vrc.AgentTools.Editor" in note
+        assert "docs/unity-tools.md" in note
+
+
+def test_no_such_member_note_routes_and_never_guesses_the_door():
+    """5 of the 19 recorded hits wrote `CompileController.Run` for `Compile`. A note that
+    guessed would be right often enough to be trusted and wrong often enough to cost the
+    round trip it exists to save."""
+    note = ec.no_such_member_note(
+        ["Line 12: 'CompileController' does not contain a definition for 'Run'"], CENSUS)
+    assert note and "CompileController" in note
+    assert "Compile(" not in note and "you meant" not in note
+    assert "declaration site is canon" in note
+
+
+def test_vendor_types_earn_no_note_on_either_dialect():
+    """83% of this key's occurrences in the transcript census name a vendor or BCL type,
+    where nothing in this workspace's docs would help."""
+    for line in (CODEDOM_MISS, CODEDOM_TYPE_PREFIXED, ROSLYN_INSTANCE_MISS):
+        assert ec.no_such_member_note([line], CENSUS) is None
+
+
+def test_the_codedom_ambiguity_cascade_earns_no_second_note():
+    """Reproduced live: `Random.Range(0, 5)` under CodeDom emits the CS0104 pair AND this
+    key naming `System.Random`. The ambiguity note already states the reader's real problem;
+    a note about `System.Random`'s members would contradict it."""
+    cascade = [
+        "Line 12: `Random' is an ambiguous reference between `System.Random' and "
+        "`UnityEngine.Random'",
+        "Line 12: `System.Random' does not contain a definition for `Range'"]
+    assert ec.no_such_member_note(cascade, CENSUS) is None
+    notes = ec.compile_notes(cascade, CENSUS)
+    assert notes == [ec.AMBIGUITY_NOTE_TEXT]
+
+
+def test_a_generic_or_array_receiver_is_never_half_parsed():
+    """A backward token scan reads `List<ReportConsole>` as `ReportConsole>` and, after any
+    tidying of trailing punctuation, as a confident note about a generic that is not ours."""
+    for recv in ("List<ReportConsole>", "ReportConsole[]", "ReportConsole*",
+                 "Dictionary<string, ReportConsole>", "Vendor.Outer.ReportConsole.Result"):
+        line = f"Line 12: '{recv}' does not contain a definition for 'Foo'"
+        assert ec.no_such_member_note([line], CENSUS) is None, recv
+
+
+def test_one_note_per_response_not_per_error_line():
+    lines = [ROSLYN_MISS,
+             "Line 13: 'ReportConsole' does not contain a definition for 'AlsoMissing'"]
+    notes = ec.compile_notes(lines, CENSUS)
+    assert len([n for n in notes if "docs/unity-tools.md" in n]) == 1
+
+
+def test_two_kit_classes_in_one_snippet_are_named_in_one_note():
+    lines = [ROSLYN_MISS,
+             "Line 20: 'UploadAvatar' does not contain a definition for 'Go'"]
+    note = ec.no_such_member_note(lines, CENSUS)
+    assert note.count("[vrc-mcp-proxy]") == 1
+    assert "ReportConsole" in note and "UploadAvatar" in note
+    assert "Ryan6Vrc.AgentTools.Editor" in note and "Ryan6Vrc.AvatarTools.Editor" in note
+    assert "are one of" in note or "are" in note
+
+
+def test_no_census_means_silence_not_a_generic_note():
+    """The first miss after startup lands before the background build finishes. Silence is
+    the answer: the note's whole content is a claim the census is needed to make."""
+    assert ec.no_such_member_note([ROSLYN_MISS], None) is None
+    assert ec.no_such_member_note([ROSLYN_MISS], {}) is None
+    assert ec.compile_notes([ROSLYN_MISS], None) == []
+
+
+def test_note_rides_the_compile_notes_switch():
+    msg = make_result(1, payload={
+        "success": False, "data": {"errors": [ROSLYN_MISS], "compiler": "roslyn"}})
+    off = ec.annotate(msg, {"action": "execute"},
+                      {"execute_code_compile_notes": False,
+                       "execute_code_prelude_offset_note": False}, census=CENSUS)
+    assert "unity-tools.md" not in json.dumps(off)
+    msg2 = make_result(1, payload={
+        "success": False, "data": {"errors": [ROSLYN_MISS], "compiler": "roslyn"}})
+    on = ec.annotate(msg2, {"action": "execute"},
+                     {"execute_code_compile_notes": True,
+                      "execute_code_prelude_offset_note": False}, census=CENSUS)
+    assert "docs/unity-tools.md" in json.dumps(on)
+
+
+def test_note_reaches_both_surfaces_and_rides_replay():
+    for action in ("execute", "replay"):
+        msg = make_result(1, payload={
+            "success": False, "data": {"errors": [ROSLYN_MISS], "compiler": "roslyn"}})
+        out = ec.annotate(msg, {"action": action},
+                          {"execute_code_compile_notes": True,
+                           "execute_code_prelude_offset_note": False}, census=CENSUS)
+        # Both surfaces: its own `content` block, and the `proxy_transport_note` key in
+        # structuredContent — the surface an MCP client actually shows the model, and the
+        # one every response transform here missed until it was found.
+        assert "docs/unity-tools.md" in out["result"]["content"][-1]["text"]
+        assert "docs/unity-tools.md" in \
+            out["result"]["structuredContent"]["proxy_transport_note"]
+
+
+def test_a_successful_call_is_never_annotated():
+    msg = make_result(1, payload={"success": True, "data": {"result": ROSLYN_MISS}})
+    out = ec.annotate(msg, {"action": "execute"},
+                      {"execute_code_compile_notes": True,
+                       "execute_code_prelude_offset_note": False}, census=CENSUS)
+    assert "unity-tools.md" not in json.dumps(out)

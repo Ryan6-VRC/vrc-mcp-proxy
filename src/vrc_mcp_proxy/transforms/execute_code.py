@@ -11,8 +11,9 @@ Request-side:
 
 Response-side (both advisory notes, neither rewrites a payload — see the block above
 `_ERROR_LINE`):
-  * compile notes: name the fix for three compile traps — two lifted out of `docs/unity.md`,
-    plus the unresolved-name trap that doc never described.
+  * compile notes: name the fix for four compile traps — two lifted out of `docs/unity.md`,
+    plus the unresolved-name and no-such-member traps that doc never described. The last of
+    those routes rather than prescribes, and needs the venue's kit census (`kits.py`).
   * prelude offset note: disclose that the reported line numbers count the lines the
     request side injected, and how to read the two bands that are not the caller's at all.
 """
@@ -20,6 +21,7 @@ import json
 import re
 import uuid
 
+from .. import kits
 from ..envelope import add_note, first_text_payload
 
 # Why the proxy disables a gate rather than scoping it (the queue's original ask was to
@@ -393,6 +395,28 @@ _TYPE_IN_VALUE_POSITION = ("is a type, which is not valid in the given context",
 # annotating a different error with the wrong note.
 _UNRESOLVED_NAME = "does not exist in the current context"
 
+# A member that does not exist on a type that does (CS0117 static / CS1061 instance). Like
+# _UNRESOLVED_NAME this is ONE key, not a dialect pair — measured on a live Editor (Sandbox,
+# 2026-08-14) the suffix is byte-identical and only the quoting and one prefix differ:
+#   roslyn : Line 12: 'ReportConsole' does not contain a definition for 'NoSuchDoor'
+#   codedom: Line 12: `UnityEditor.AssetDatabase' does not contain a definition for `NoSuchMethodHere'
+#   codedom: Line 13: Type `string' does not contain a definition for `NoSuchExtensionThing' …
+#
+# Matched with an ANCHORED regex, not a substring test plus a backward token scan, because
+# the receiver is the one part of this note that must never be half-parsed: the capture is
+# what decides whether the note fires. A backward scan reads
+# `'List<ReportConsole>' does not contain a definition for 'Foo'` as the token
+# `ReportConsole>`, and after any tidying of trailing punctuation as a confident note about
+# a generic that is not ours. So the capture is validated as a plain dotted identifier chain
+# and everything else — generic, array, pointer, nested-with-arity — drops into silence,
+# which is the right answer for every one of them.
+_NO_SUCH_MEMBER = "does not contain a definition for"
+_NO_SUCH_MEMBER_LINE = re.compile(
+    r"^Line \d+: (?:Type )?['\x60](?P<type>[^'\x60]+)['\x60] "
+    + re.escape(_NO_SUCH_MEMBER)
+    + r" ['\x60](?P<member>\w+)['\x60]")
+_IDENT_CHAIN = re.compile(r"^[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*$")
+
 AMBIGUITY_NOTE_TEXT = (
     "[vrc-mcp-proxy] that ambiguity is execute_code's own: it pre-imports six namespaces "
     "together, so a name two of them both define resolves to neither. The error above "
@@ -425,6 +449,26 @@ UNRESOLVED_NAME_NOTE_TEXT = (
     "name is a TYPE, is already spelled right, and is either fully-qualified or inside those "
     "six namespaces, it is the typo "
     "case — recheck it against the actual API rather than adding a namespace."
+)
+
+# Routes; it does not enumerate. The note says WHICH kit owns the type and sends the reader
+# to the one place that carries the call — `docs/unity-tools.md` gives every door one literal
+# call and says the declaration site is canon. Naming the doors here instead was designed and
+# cut: the door set is `public static string` at depth 1 MINUS curation tables that live only
+# in Atelier's `sync_tool_inventory.py`, so a re-derivation diverges on 4 of the 38 classes —
+# worst on `ReportConsole`, the class the transcript census shows is hit most, which would be
+# listed with two internals that doc deliberately omits. `kits.py` owns the rest of that
+# argument.
+#
+# States what it can see and stops. It does not guess which door was meant: 5 of the 19
+# recorded hits wrote `CompileController.Run` for `Compile`, and a note that guessed would be
+# right often enough to be trusted and wrong often enough to cost the round trip it saves —
+# inferring a purpose from a state, which is what the lifting rule forbids.
+NO_SUCH_MEMBER_NOTE_TEXT = (
+    "[vrc-mcp-proxy] {subject} {verb} one of this workspace's own tool classes ({kits}), so "
+    "the type is right and the member name is not. Every door carries one literal call on "
+    "its row in `docs/unity-tools.md` — read the call shape there rather than guessing "
+    "another verb; the declaration site is canon."
 )
 
 TYPE_IN_VALUE_POSITION_NOTE_TEXT = (
@@ -469,7 +513,62 @@ def _compile_error_lines(payload):
     return [str(e) for e in data["errors"] if _ERROR_LINE.match(str(e))]
 
 
-def compile_notes(errors):
+def no_such_member_note(errors, census):
+    """The kit-routing note for a no-such-member failure, or None.
+
+    Gated on the receiver resolving to an `[AgentTool]` class in the venue's own census.
+    That gate is doing three jobs, and the second is the one that is easy to miss:
+
+    1. It is what makes the note sayable at all — the claim is "this type is ours", which
+       requires knowing which types are ours.
+    2. It suppresses a measured false positive. Under CodeDom an ambiguity cascades into
+       this very key: `Random.Range(0, 5)` yields the CS0104 pair AND
+       ``Line 12: `System.Random' does not contain a definition for `Range'`` (reproduced
+       live, 2026-08-14). The reader's problem there is the ambiguity, which
+       AMBIGUITY_NOTE_TEXT already states correctly; a second note about `System.Random`
+       would contradict it. `System.Random` is not a kit class, so the gate drops it.
+       This is NOT the mutual exclusion `compile_notes` deliberately does not wire in —
+       that policy is about two notes describing two real mistakes, and it still holds.
+       This is one note declining to fire where its own subject is not ours.
+    3. It keeps the note silent for `AssetDatabase`, `PrefabUtility`, `string` and every
+       other vendor type — 83% of this key's occurrences in the transcript census — where
+       nothing in this workspace's docs would help.
+
+    One note per response, never per line: a single wrong verb can produce several error
+    lines, and `compile_notes`' own contract is one note per distinct trap.
+    """
+    if not census:
+        return None
+    resolved = []
+    for e in errors:
+        m = _NO_SUCH_MEMBER_LINE.match(e)
+        if not m:
+            continue
+        captured = m.group("type")
+        if not _IDENT_CHAIN.match(captured):
+            continue          # generic/array/nested receiver — cannot be claimed safely
+        fqn = kits.lookup(census, captured)
+        if fqn and fqn not in resolved:
+            resolved.append(fqn)
+    if not resolved:
+        return None
+    # Plural is reachable: two different kit classes can each earn a line in one snippet.
+    # Naming both beats picking one, and beats two notes making the same point twice.
+    subject = ", ".join(f"`{f.rsplit('.', 1)[-1]}'" for f in resolved)
+    verb = "is" if len(resolved) == 1 else "are"
+    # The namespace, not the whole FQN: the class name is already the subject, and repeating
+    # it inside the parenthetical reads as two different facts. The kit is the new fact —
+    # AgentTools vs AvatarTools is the qualification agents get wrong (`unity.md` §Invocation).
+    namespaces = []
+    for f in resolved:
+        ns = f.rsplit(".", 1)[0] if "." in f else f
+        if ns not in namespaces:
+            namespaces.append(ns)
+    return NO_SUCH_MEMBER_NOTE_TEXT.format(
+        subject=subject, verb=verb, kits=", ".join(namespaces))
+
+
+def compile_notes(errors, census=None):
     """The trap notes earned by a list of compile-error strings, in a stable order.
 
     One note per distinct trap, never per matching line: one mistake yields two errors on
@@ -491,6 +590,9 @@ def compile_notes(errors):
         notes.append(TYPE_IN_VALUE_POSITION_NOTE_TEXT)
     if any(_UNRESOLVED_NAME in e for e in errors):
         notes.append(UNRESOLVED_NAME_NOTE_TEXT)
+    member = no_such_member_note(errors, census)
+    if member:
+        notes.append(member)
     return notes
 
 
@@ -519,7 +621,7 @@ def prelude_note(errors, prelude_lines, wrapped=True):
 _ANNOTATED_ACTIONS = frozenset({"execute", "replay"})
 
 
-def annotate(msg, arguments, cfg, prelude_lines=0):
+def annotate(msg, arguments, cfg, prelude_lines=0, census=None):
     """Append compile-failure notes to an execute_code response. Never rewrites anything.
 
     Ordering note for callers: this only ever calls `add_note`, so it must run AFTER any
@@ -538,7 +640,8 @@ def annotate(msg, arguments, cfg, prelude_lines=0):
         errors = _compile_error_lines(json.loads(text))
     except (json.JSONDecodeError, TypeError, ValueError):
         return msg
-    notes = compile_notes(errors) if cfg.get("execute_code_compile_notes", True) else []
+    notes = (compile_notes(errors, census)
+             if cfg.get("execute_code_compile_notes", True) else [])
     if cfg.get("execute_code_prelude_offset_note", True):
         offset = prelude_note(errors, prelude_lines,
                               wrapped=cfg.get("execute_code_idempotency_guard", True))

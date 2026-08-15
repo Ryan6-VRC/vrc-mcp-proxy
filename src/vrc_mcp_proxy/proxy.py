@@ -25,7 +25,7 @@ import threading
 import traceback
 from datetime import datetime, timezone
 
-from . import canary, config, instances
+from . import canary, config, instances, kits
 from .allowlist import filter_tools_list, is_allowed, refusal_result
 from .envelope import (
     first_text_payload,
@@ -209,6 +209,12 @@ class Proxy:
             execute_timeout_s if execute_timeout_s is not None else _read_execute_timeout())
         self._pending_lock = threading.Lock()
         self._out_lock = threading.Lock()
+        # Venue kit census for the no-such-member note. Built on its OWN threads and never
+        # waited on: it is read from the single relay thread, where a filesystem walk would
+        # stall every queued response behind it while the F52 watchdog — an independent
+        # timer — fired anyway, writing a Roslyn tombstone for a call whose real answer was
+        # sitting in that queue. `ensure` (request side) kicks; `get` (response side) reads.
+        self._kits = kits.KitCensus()
 
     # --- wire I/O ---------------------------------------------------------
     def _write_client(self, obj):
@@ -381,7 +387,24 @@ class Proxy:
 
         venue = None  # set only on the execute_code path; read by _remember below
         prelude_lines = 0  # ditto: lines injected ahead of the caller's code
+        census_root = None  # ditto: venue whose kit census the response-side note may read
         if name == "execute_code":
+            # Kit census for the no-such-member note. Resolved HERE, on the request side,
+            # for the same reason the venue guard is: a set_active_instance landing between
+            # this call and its response would otherwise repoint the census at another venue
+            # and the note would describe the wrong one. It is a different resolver from the
+            # guard's — `resolve_project_root`, whose docstring draws the split: it feeds
+            # work that only ever SOFTENS a result, so a stale heartbeat costs an unverified
+            # note, where `resolve_assets_path` feeds a fail-closed guard and must not.
+            #
+            # The selector is the same pair the server routes on. Note it is NOT
+            # `requested_instance`, which `_remember` populates only for set_active_instance
+            # and would be None on every call reaching here.
+            if self.cfg.get("execute_code_compile_notes", True):
+                census_root = instances.resolve_project_root(
+                    arguments.get("unity_instance") if isinstance(arguments, dict) else None,
+                    self.active_instance)
+                self._kits.ensure(census_root)   # returns at once; builds on its own thread
             # Resolve the pinned venue for the guard. Same two knobs the server routes on,
             # read at request time so a later set_active_instance can't retarget this call.
             if self.cfg.get("execute_code_venue_guard", True):
@@ -470,7 +493,8 @@ class Proxy:
         self._remember(req_id, "tools/call", name, arguments,
                        active_snapshot=self.active_instance,
                        requested_instance=requested_instance,
-                       venue_guarded=bool(venue), prelude_lines=prelude_lines)
+                       venue_guarded=bool(venue), prelude_lines=prelude_lines,
+                       census_root=census_root)
         # F52 watchdog: arm ONLY on execute_code/execute (the exact gate execute_code.py:88
         # transforms on). Armed before forwarding so pending+timer are set before the child
         # can respond; a fast response cancels it in _take.
@@ -637,7 +661,12 @@ class Proxy:
                     # null `tool` besides. A comment asserting a hazard that isn't live is
                     # the same stale-premise class the paired atelier PR is fixing in
                     # unity.md.)
-                    prelude_lines=info.get("prelude_lines") or 0)
+                    prelude_lines=info.get("prelude_lines") or 0,
+                    # An already-built census or None — `get` never touches the filesystem,
+                    # so this stays a dict lookup on the relay thread. None (no venue
+                    # resolved, or the first miss before the background build finished)
+                    # means the no-such-member note stays silent for this response.
+                    census=self._kits.get(info.get("census_root")))
             if self.cfg.get("instance_not_found_note", True):
                 # Reads the heartbeat directory, so it is the one note here that can raise on
                 # a filesystem fault — and this region is SHARED, so a raise costs every note
@@ -691,7 +720,7 @@ class Proxy:
     # --- pending-request bookkeeping --------------------------------------
     def _remember(self, req_id, method, tool, args,
                   active_snapshot=None, requested_instance=None, venue_guarded=False,
-                  prelude_lines=0):
+                  prelude_lines=0, census_root=None):
         stale_timer = None
         with self._pending_lock:
             if req_id in self.pending:
@@ -722,7 +751,8 @@ class Proxy:
                                     "active": active_snapshot,
                                     "requested_instance": requested_instance,
                                     "venue_guarded": venue_guarded,
-                                    "prelude_lines": prelude_lines}
+                                    "prelude_lines": prelude_lines,
+                                    "census_root": census_root}
         # Cancel OUTSIDE the lock — _pending_lock is never held across other blocking work.
         if stale_timer is not None:
             stale_timer.cancel()

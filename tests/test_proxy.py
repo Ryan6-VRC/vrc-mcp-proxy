@@ -711,3 +711,80 @@ def test_marker_not_rewritten_when_no_guard_was_emitted(monkeypatch):
                                      "data": {"result": VENUE_MISROUTE_MARKER + " quoted"}}))
     out = json.loads(p.client_out.lines[-1])
     assert "isError" not in out["result"]
+
+
+# --- kit census plumbing (the no-such-member note) --------------------------
+def _census_cfg():
+    cfg = _all_off()
+    cfg["execute_code_compile_notes"] = True
+    return cfg
+
+
+def test_census_is_resolved_from_the_active_pin_not_requested_instance(tmp_path, monkeypatch):
+    """Regression: an earlier draft read `info["requested_instance"]`, which `_remember`
+    populates ONLY for set_active_instance. On every execute_code call it is None, so the
+    census resolved through the no-selector arm — which needs exactly one heartbeat — and
+    the note was silently dead on any machine running more than one Editor. `active` is the
+    snapshot the rest of the response path already verifies against."""
+    monkeypatch.setattr(instances, "DEFAULT_DIR", str(tmp_path))
+    _write_hb(tmp_path, "aaaa1111", 6401, "C:/proj/One", "One")
+    _write_hb(tmp_path, "bbbb2222", 6402, "C:/proj/Two", "Two")
+    p = _proxy(_census_cfg())
+    p.active_instance = "Two@bbbb2222"
+    seen = []
+    monkeypatch.setattr(p._kits, "ensure", lambda root, **kw: seen.append(root))
+    p.handle_client_line(_call_request(7, "execute_code",
+                                       {"action": "execute", "code": "return 1;"}))
+    assert seen == ["C:/proj/Two"], "census must follow the session's pin"
+    assert p.pending[7]["census_root"] == "C:/proj/Two"
+
+
+def test_census_root_is_read_at_request_time_not_response_time(tmp_path, monkeypatch):
+    """A set_active_instance landing between an execute_code call and its response must not
+    repoint that call's census — the same race `execute_code_venue_guard` resolves at
+    request time to avoid."""
+    monkeypatch.setattr(instances, "DEFAULT_DIR", str(tmp_path))
+    _write_hb(tmp_path, "aaaa1111", 6401, "C:/proj/One", "One")
+    _write_hb(tmp_path, "bbbb2222", 6402, "C:/proj/Two", "Two")
+    p = _proxy(_census_cfg())
+    p.active_instance = "One@aaaa1111"
+    monkeypatch.setattr(p._kits, "ensure", lambda root, **kw: None)
+    p.handle_client_line(_call_request(8, "execute_code",
+                                       {"action": "execute", "code": "return 1;"}))
+    p.active_instance = "Two@bbbb2222"          # the retarget the response must not follow
+    assert p.pending[8]["census_root"] == "C:/proj/One"
+
+
+def test_no_census_is_built_when_compile_notes_are_disabled(tmp_path, monkeypatch):
+    monkeypatch.setattr(instances, "DEFAULT_DIR", str(tmp_path))
+    _write_hb(tmp_path, "aaaa1111", 6401, "C:/proj/One", "One")
+    cfg = _all_off()                            # execute_code_compile_notes False
+    p = _proxy(cfg)
+    p.active_instance = "One@aaaa1111"
+    seen = []
+    monkeypatch.setattr(p._kits, "ensure", lambda root, **kw: seen.append(root))
+    p.handle_client_line(_call_request(9, "execute_code",
+                                       {"action": "execute", "code": "return 1;"}))
+    assert seen == []
+    assert p.pending[9]["census_root"] is None
+
+
+def test_the_response_path_never_builds_the_census(tmp_path, monkeypatch):
+    """`get` must stay a dict read: the response path is the single relay thread, where a
+    filesystem walk stalls every queued response while the F52 watchdog fires anyway."""
+    monkeypatch.setattr(instances, "DEFAULT_DIR", str(tmp_path))
+    _write_hb(tmp_path, "aaaa1111", 6401, "C:/proj/One", "One")
+    p = _proxy(_census_cfg())
+    p.active_instance = "One@aaaa1111"
+
+    def boom(*a, **k):
+        raise AssertionError("the response path built a census on the relay thread")
+
+    monkeypatch.setattr(p._kits, "ensure", lambda root, **kw: None)
+    p.handle_client_line(_call_request(10, "execute_code",
+                                       {"action": "execute", "code": "return 1;"}))
+    monkeypatch.setattr(p._kits, "ensure", boom)
+    p.handle_child_line(make_result_line(10, payload={
+        "success": False,
+        "data": {"errors": ["Line 12: 'ReportConsole' does not contain a definition for "
+                            "'NoSuchDoor'"], "compiler": "roslyn"}}))
