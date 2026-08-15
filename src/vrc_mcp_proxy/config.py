@@ -41,6 +41,12 @@ BEHAVIORS = (
     "execute_code_compile_notes",
     "execute_code_prelude_offset_note",
     "instance_not_found_note",
+    # Two keys again, and the same rule draws the line: the pattern note keys on the
+    # CALLER's own argument and cannot go stale from upstream, while the scope note keys on
+    # returned data plus this machine's venue resolution and can. They also retire different
+    # halves of one unity.md bullet, so they are separately retirable.
+    "manage_asset_search_pattern_note",
+    "manage_asset_search_scope_note",
 )
 
 

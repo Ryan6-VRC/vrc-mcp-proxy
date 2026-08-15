@@ -319,11 +319,66 @@ def main():
            f"(root => a rename silently relocates; beside => upstream fixed it)")
 
     # -- F23: search for the OLD path immediately post-move --
+    # Scoped by filter_type, NOT by a `*.mat` search_pattern. This probe used to pass one,
+    # which the F23b measurement below shows can never match a material: the extension is
+    # excluded from the matched name, so the probe returned 0 and reported CHECK-MANUALLY
+    # forever — a driver checking upstream for a lie, defeated by a different lie of the
+    # same upstream.
     r = c.call_tool("manage_asset",
-                    {"action": "search", "path": "Assets/A10Repro", "search_pattern": "*.mat"}, timeout=90)
+                    {"action": "search", "path": "Assets/A10Repro", "filter_type": "Material"},
+                    timeout=90)
     payload = json.dumps(r.get("payload"))[:600]
     stale = "A10Repro/mat" in payload and "Dest" not in payload
     record("F23-stale-search", "REPRODUCED" if stale else "CHECK-MANUALLY", payload[:400])
+
+    # -- F23b: is the extension still excluded from the name match? --
+    # Three assertions on one purpose-built fixture, because the obvious one-liner
+    # (`Name.ext` finds nothing) passes under a GLOB matcher too — the model this row's
+    # measurement falsified. The fixture's stem carries a dot of its own, which is what
+    # makes the other two discriminating.
+    c.call_tool("execute_code", {"action": "execute", "code": (
+        'UnityEditor.AssetDatabase.CreateAsset('
+        'new UnityEngine.Material(UnityEngine.Shader.Find("Standard")), '
+        '"Assets/A10Repro/alpha.beta.mat");\n'
+        'UnityEditor.AssetDatabase.SaveAssets();\nreturn "ok";')}, timeout=120)
+
+    def _total(pattern, path="Assets/A10Repro"):
+        got = c.call_tool("manage_asset", {"action": "search", "path": path,
+                                           "search_pattern": pattern}, timeout=90)
+        try:
+            return got["payload"]["data"]["totalAssets"]
+        except (KeyError, TypeError):
+            return None
+
+    # Stem "alpha.beta": forward matches under every model; the extension never should;
+    # reversed matches only if `.` SPLITS the filter rather than being matched literally;
+    # and the `*` form matches only if `*` splits rather than globbing.
+    forward, with_ext = _total("alpha.beta"), _total("alpha.beta.mat")
+    reversed_, starred = _total("beta.alpha"), _total("beta*alpha")
+    if forward:
+        verdict = ("REPRODUCED" if with_ext == 0 and reversed_ == 0 and starred
+                   else "NOT-REPRODUCED")
+    else:
+        verdict = "INCONCLUSIVE"
+    record("F23b-extension-excluded-from-name-match", verdict,
+           f"'alpha.beta'={forward} (fixture visible) 'alpha.beta.mat'={with_ext} "
+           f"(0 => extension excluded from the match) 'beta.alpha'={reversed_} "
+           f"(0 => `.` is matched literally, not a separator) 'beta*alpha'={starred} "
+           f"(>0 => `*` is a SEPARATOR, not a wildcard). "
+           f"Retire manage_asset_search_pattern_note only when 'alpha.beta.mat' finds it.")
+
+    # -- F23c: is a scope path that is not a valid folder still dropped? --
+    # Independently retirable from F23b: different mechanism (argument resolution, not name
+    # matching), different behavior, its own ledger row. Two shapes, because upstream can
+    # fix either alone: a nonexistent folder, and a Packages/... root the Assets/ force-
+    # prefix destroys.
+    missing = _total("alpha.beta", path="Assets/A10Repro__nope")
+    packaged = _total("alpha.beta", path="Packages/com.unity.ide.rider")
+    record("F23c-scope-path-dropped",
+           "REPRODUCED" if (missing or 0) > 0 or (packaged or 0) > 0 else "NOT-REPRODUCED",
+           f"hits under a nonexistent scope={missing}, under a Packages/ scope={packaged} "
+           f"(>0 on either => the scope was dropped and the search went project-wide; "
+           f"both 0 => upstream now honors or refuses the scope)")
 
     return _finish(c, args)
 
