@@ -98,3 +98,86 @@ def test_untabled_action_forwards():
 def test_non_dict_arguments_forward():
     assert ms.refusal_for(None) is None
     assert ms.refusal_for("get_hierarchy") is None
+
+
+# --- Single-mode scene discard -------------------------------------------------------------
+
+
+def test_bare_load_refuses_and_routes_to_the_call_that_reports_dirtiness():
+    text = ms.discard_refusal_for({"action": "load", "name": "Sandbox"})
+    assert text is not None
+    # The refusal's whole value over a note: it hands back the call that returns the fact,
+    # so additive=false means "I looked" rather than "I read the error message".
+    assert "get_loaded_scenes" in text
+    assert "additive=false" in text
+
+
+def test_bare_create_refuses_and_says_it_has_no_gate_at_all():
+    text = ms.discard_refusal_for({"action": "create", "name": "Probe"})
+    assert text is not None
+    assert "no gate at all" in text
+    # create has no additive mode, so it must not offer additive=true as the escape.
+    assert "additive=true" not in text
+
+
+def test_refusal_states_its_own_limit():
+    # unity.md routes agents to raw execute_code OpenScene in emulator venues, which never
+    # reaches this guard. A refusal implying full coverage would be the worse failure.
+    text = ms.discard_refusal_for({"action": "load", "name": "Sandbox"})
+    assert "execute_code is unguarded" in text or "unguarded" in text
+
+
+def test_declared_additive_forwards_either_way():
+    assert ms.discard_refusal_for({"action": "load", "name": "S", "additive": True}) is None
+    assert ms.discard_refusal_for({"action": "load", "name": "S", "additive": False}) is None
+    assert ms.discard_refusal_for({"action": "create", "name": "S", "additive": False}) is None
+
+
+def test_additive_true_on_create_refuses_rather_than_honoring_a_word_it_inverts():
+    # CreateScene hardcodes NewSceneMode.Single; forwarding would close every loaded scene
+    # while the caller had asked to build alongside them.
+    text = ms.discard_refusal_for({"action": "create", "name": "Probe", "additive": True})
+    assert text is not None
+    assert "no additive mode" in text
+
+
+def test_additive_true_with_buildindex_alone_refuses():
+    # ToSceneCommand consults additive only inside the name/path branch, so the buildIndex
+    # form silently drops it and opens Single.
+    text = ms.discard_refusal_for({"action": "load", "buildIndex": 2, "additive": True})
+    assert text is not None
+    assert "buildIndex" in text
+
+
+def test_additive_true_with_a_path_is_honored_and_forwards():
+    assert ms.discard_refusal_for(
+        {"action": "load", "path": "Assets/S.unity", "additive": True}) is None
+
+
+def test_null_additive_is_not_a_declaration():
+    assert ms.discard_refusal_for({"action": "load", "name": "S", "additive": None}) is not None
+
+
+def test_untouched_actions_forward():
+    for action in ("save", "close_scene", "get_loaded_scenes", "get_hierarchy"):
+        assert ms.discard_refusal_for({"action": action}) is None
+
+
+def test_discard_guard_ignores_non_dict_arguments():
+    assert ms.discard_refusal_for(None) is None
+    assert ms.discard_refusal_for("load") is None
+
+
+def test_additive_is_stripped_from_create_but_not_from_load():
+    # It is this guard's confirm token; upstream binds it for create and never reads it, which
+    # is the silently-dropped-argument shape the sibling guard exists to refuse.
+    assert ms.strip_proxy_only_args({"action": "create", "name": "S", "additive": False}) == {
+        "action": "create", "name": "S"}
+    load = {"action": "load", "name": "S", "additive": False}
+    assert ms.strip_proxy_only_args(load) is load
+
+
+def test_strip_returns_the_same_object_when_there_is_nothing_to_strip():
+    # The caller decides whether to rebuild the JSON-RPC message on an identity check.
+    args = {"action": "create", "name": "S"}
+    assert ms.strip_proxy_only_args(args) is args

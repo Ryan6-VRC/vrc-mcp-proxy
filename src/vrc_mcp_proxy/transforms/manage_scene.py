@@ -85,3 +85,100 @@ def refusal_for(arguments):
                 f"{intended}={json.dumps(arguments[arg])}."
             )
     return None
+
+
+# ---------------------------------------------------------------------------
+# Single-mode scene discard (request-side).
+#
+# `load` (without additive) and `create` both open Single, which closes EVERY loaded scene.
+# Upstream gates only the ACTIVE one: LoadScene checks GetActiveScene().isDirty, and
+# CreateScene checks nothing at all. So an additively-loaded dirty scene is discarded with no
+# error and no prompt — and additive is exactly what unity.md tells an agent to do when a
+# shared editor holds someone else's dirty scene.
+#
+# The proxy is a relay and cannot ask Unity anything, so this cannot check dirtiness itself.
+# What it can do is refuse to let the destructive mode be the SILENT DEFAULT, and hand back the
+# call that returns the fact: `get_loaded_scenes` reports per-scene `isDirty` for every loaded
+# scene, which is precisely the state the two handlers fail to consult. `additive: false` then
+# means "I looked", not "I read the error message" — the distinction the guard exists for, and
+# the reason this refuses rather than merely noting.
+_DISCARD_ACTIONS = ("load", "create")
+
+
+def _has_scene_path(arguments):
+    """Whether upstream will resolve a scene PATH for this call. `additive` is consulted only
+    inside that branch (ToSceneCommand routes buildIndex to LoadScene(int), which opens Single
+    unconditionally), so this is what decides whether a declared `additive: true` is honored."""
+    return _supplied(arguments, "name") or _supplied(arguments, "path")
+
+
+def discard_refusal_for(arguments):
+    """Return refusal text for a Single-mode scene discard the caller has not declared, or None
+    to forward."""
+    if not isinstance(arguments, dict):
+        return None
+    action = arguments.get("action")
+    if isinstance(action, str):
+        action = action.strip().lower()
+    if action not in _DISCARD_ACTIONS:
+        return None
+
+    declared = _supplied(arguments, "additive")
+    additive = arguments.get("additive") is True
+
+    if action == "create" and declared and additive:
+        # There is no additive create: `additive` is documented upstream as "for load additive
+        # mode" and CreateScene hardcodes NewSceneMode.Single. Forwarding this would honor the
+        # word and perform its opposite.
+        return (
+            "manage_scene 'create' has no additive mode — it always opens Single and closes "
+            "every loaded scene, and upstream reads 'additive' only on 'load'. To build "
+            "alongside existing scenes, create the scene and then load it with "
+            "additive=true, or confirm the discard with additive=false."
+        )
+
+    if declared and additive and action == "load" and not _has_scene_path(arguments):
+        # buildIndex form: upstream never reaches the additive branch, so the caller's declared
+        # intent is dropped and they get the Single-mode discard they explicitly refused.
+        return (
+            "manage_scene 'load' reads 'additive' only when loading by name/path — a "
+            "buildIndex load opens Single and closes every loaded scene, silently ignoring "
+            "additive=true. Re-issue with the scene's path, or with additive=false if "
+            "discarding the other loaded scenes is what you want."
+        )
+
+    if declared:
+        return None
+
+    return (
+        f"manage_scene '{action}' opens the scene in Single mode, which closes EVERY loaded "
+        f"scene — and upstream's unsaved-work gate reads only the ACTIVE one "
+        f"({'create has no gate at all' if action == 'create' else 'load checks the active scene alone'}), "
+        "so an additively-loaded dirty scene is discarded with no error. Declare the intent: "
+        "run manage_scene get_loaded_scenes first, and if any scene you are not replacing "
+        "reports isDirty=true, save or close it "
+        f"{'before re-issuing' if action == 'create' else 'or re-issue with additive=true to load alongside it'}"
+        ". Otherwise re-issue with additive=false. This guard covers the manage_scene door "
+        "only — a raw EditorSceneManager.OpenScene/NewScene over execute_code is unguarded."
+    )
+
+
+def strip_proxy_only_args(arguments):
+    """Drop `additive` from a 'create' call before forwarding.
+
+    On 'create' the flag is this guard's confirm token and nothing else — upstream binds it and
+    never reads it for that action, which is the silently-dropped-argument shape the guard above
+    exists to refuse. Consuming it here keeps the proxy from committing the same offense.
+
+    Returns the original object when there is nothing to strip, so the caller's `is not` identity
+    check still decides whether the message needs rebuilding."""
+    if not isinstance(arguments, dict):
+        return arguments
+    action = arguments.get("action")
+    if isinstance(action, str):
+        action = action.strip().lower()
+    if action != "create" or "additive" not in arguments:
+        return arguments
+    stripped = dict(arguments)
+    del stripped["additive"]
+    return stripped
