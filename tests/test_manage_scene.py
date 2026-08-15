@@ -181,3 +181,34 @@ def test_strip_returns_the_same_object_when_there_is_nothing_to_strip():
     # The caller decides whether to rebuild the JSON-RPC message on an identity check.
     args = {"action": "create", "name": "S"}
     assert ms.strip_proxy_only_args(args) is args
+
+
+def test_string_additive_is_read_the_way_upstream_coerces_it():
+    # ParamCoercion.CoerceBoolNullable accepts "true"/"1"/"yes"/"on" and the negatives, so a
+    # `value is True` reading would make these declared-but-not-additive and skip both
+    # silent-drop refusals below.
+    for truthy in ("true", "TRUE", " True ", "1", "yes", "on"):
+        text = ms.discard_refusal_for({"action": "create", "name": "P", "additive": truthy})
+        assert text is not None, truthy
+        assert "no additive mode" in text
+        text = ms.discard_refusal_for({"action": "load", "buildIndex": 2, "additive": truthy})
+        assert text is not None, truthy
+        assert "buildIndex" in text
+
+
+def test_string_false_declares_the_discard_and_forwards():
+    for falsy in ("false", "0", "no", "off"):
+        assert ms.discard_refusal_for({"action": "load", "name": "S", "additive": falsy}) is None, falsy
+
+
+def test_uncoercible_additive_is_not_a_declaration():
+    # Upstream binds it to null and takes the ungated Single path, so the guard must too.
+    for junk in ("maybe", "", "  ", []):
+        assert ms.discard_refusal_for({"action": "load", "name": "S", "additive": junk}) is not None
+
+
+def test_create_refusal_does_not_prescribe_a_route_through_the_discard():
+    # create IS the discard, so "create it then load additively" loses the work first.
+    text = ms.discard_refusal_for({"action": "create", "name": "P", "additive": True})
+    assert "create the scene and then load" not in text
+    assert "NewSceneMode.Additive" in text
