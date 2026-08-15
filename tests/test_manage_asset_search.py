@@ -10,6 +10,7 @@ extension-stripped name, and `.` is an ordinary character. docs/design.md's `man
 search` row owns the measurement and the verdicts.
 """
 import json
+import pathlib
 
 from vrc_mcp_proxy.transforms import manage_asset as ma
 
@@ -57,7 +58,7 @@ def test_extension_pattern_with_hits_says_the_hits_matched_a_name():
 
 def test_extension_pattern_at_zero_does_not_claim_hits_exist():
     note = _note(ma.annotate_search_pattern(_found(0), dict(SEARCH, search_pattern="*.mat")))
-    assert "no asset's NAME contains that text" in note
+    assert "does not establish whether assets of that type exist" in note
     assert "hits above" not in note
 
 
@@ -191,7 +192,9 @@ def test_zero_hits_over_a_missing_folder_says_the_folder_is_absent(tmp_path):
     (tmp_path / "Assets" / "Real").mkdir(parents=True)
     note = _note(ma.annotate_search_scope(
         _found(0), {"action": "search", "path": "Assets/Gone"}, project_root=str(tmp_path)))
-    assert note is not None and "not on disk" in note
+    # "no such FOLDER", not "not on disk": a file at that path IS on disk and still fails,
+    # because upstream scopes by folder.
+    assert note is not None and "no such FOLDER" in note
 
 
 def test_zero_hits_over_a_real_folder_stays_quiet(tmp_path):
@@ -232,9 +235,81 @@ def test_scope_note_ignores_non_search_actions():
         {"action": "delete", "path": "Assets/Agent/Scratch/OS1"})) is None
 
 
-def test_the_tested_module_is_this_worktrees_copy():
+def test_a_reverse_dns_package_id_is_not_a_file_extension():
+    # `com.unity` ends in `.unity`, a real scene extension — so the extension set alone
+    # cannot tell a package id from a filename, and every Unity project searches package
+    # ids (this repo's own repro driver probes `Packages/com.unity.ide.rider`).
+    for pattern in ("com.unity", "com.unity.render-pipelines", "nadena.dev.modular-avatar"):
+        assert _note(ma.annotate_search_pattern(
+            _found(2, ["Assets/x.mat"]), dict(SEARCH, search_pattern=pattern))) is None
+
+
+def test_a_page_past_the_end_does_not_claim_hits_above():
+    # totalAssets counts every match; assets[] is one Skip/Take page. Branching on the
+    # total would point at "the hits above" when the page carries none.
+    msg = make_result(payload={"success": True, "data": {
+        "totalAssets": 13, "pageSize": 50, "pageNumber": 9, "assets": []}})
+    note = _note(ma.annotate_search_pattern(msg, dict(SEARCH, search_pattern="*.fbx")))
+    assert note is not None and "hits above" not in note
+
+
+def test_a_packages_scope_a_venue_actually_holds_earns_no_note():
+    # `Assets/Packages/...` is a real layout (NuGetForUnity). Naming a root outside Assets/
+    # is suspicion, not proof: with every hit inside the prefixed folder, upstream honored
+    # the scope and a confident note here would be wrong on a correct call.
+    assert _note(ma.annotate_search_scope(
+        _found(1, ["Assets/Packages/MyLib/x.mat"]),
+        {"action": "search", "path": "Packages/MyLib"})) is None
+
+
+def test_a_leading_slash_scope_upstream_resolves_earns_no_note():
+    # SanitizeAssetPath does lstrip("/"), so "/Materials/Foo" becomes the same valid
+    # "Assets/Materials/Foo" a bare relative path gives.
+    assert _note(ma.annotate_search_scope(
+        _found(1, ["Assets/Materials/Foo/x.mat"]),
+        {"action": "search", "path": "/Materials/Foo"})) is None
+
+
+def test_a_drive_qualified_path_is_provably_broken():
+    # The colon cannot appear in a folder name, so "Assets/C:/..." resolves nowhere —
+    # decidable with no venue and no hits, which is the point of the request-only arm.
+    note = _note(ma.annotate_search_scope(
+        _found(0), {"action": "search", "path": "C:/Users/x/Assets/Foo"}, project_root=None))
+    assert note is not None and "Packages" not in note
+
+
+def test_a_bare_root_name_outside_assets_is_caught():
+    # Matched on the first path segment, so a bare "Library" counts like "Library/x".
+    note = _note(ma.annotate_search_scope(
+        _found(1, ["Assets/Elsewhere/x.mat"]), {"action": "search", "path": "Library"}))
+    assert note is not None and "outside Assets/ cannot be reached" in note
+
+
+def test_a_bare_slash_scope_does_not_report_every_hit_as_outside():
+    # "/" normalizes to "" and sanitizes to "Assets/", which unstripped would make the
+    # comparison test startswith("assets//") and flag every legitimate hit.
+    assert _note(ma.annotate_search_scope(
+        _found(1, ["Assets/Materials/x.mat"]), {"action": "search", "path": "/"})) is None
+
+
+def test_wants_venue_is_false_for_calls_the_note_cannot_annotate():
+    # The relay gates a heartbeat-directory glob on this, and it runs inside the shared
+    # advisory region — so a non-dict argument answers False rather than raising.
+    assert ma.wants_venue(dict(SEARCH)) is True
+    assert ma.wants_venue({"action": "get_info", "path": "Assets/a.mat"}) is False
+    assert ma.wants_venue({"action": "search"}) is False
+    assert ma.wants_venue("not a dict") is False
+
+
+def test_the_tested_module_is_this_checkouts_copy():
     """An editable install records one absolute path, so a second checkout can import the
     first one's src/ and pass regardless of its own changes (dispatched-work.md §Worktree
-    mechanics). Print it, so the pass count is reportable beside the path it proves."""
+    mechanics). Print it, so the pass count is reportable beside the path it proves.
+
+    Anchored to this file's own repo root, never a worktree name: a hardcoded name passes
+    in one checkout and fails in the canonical clone for a reason unrelated to the code.
+    """
+    here = pathlib.Path(__file__).resolve().parents[1]
     print(f"\nmanage_asset module under test: {ma.__file__}")
-    assert "proxy-r13" in ma.__file__.replace("\\", "/")
+    assert pathlib.Path(ma.__file__).resolve().is_relative_to(here), (
+        f"imported {ma.__file__}, expected under {here}")

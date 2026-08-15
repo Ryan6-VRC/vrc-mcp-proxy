@@ -154,11 +154,18 @@ _FILTER_TERM_PREFIXES = ("t:", "l:", "a:", "b:")
 # fires on those is noise on a correct call. An extension missing from this set costs the
 # note only, which is the append-only standing this behavior rides.
 _ASSET_EXTENSIONS = frozenset("""
-anim asset blend controller cs cubemap dll exr fbx flare fontsettings guiskin hlsl cginc
-inputactions jpeg jpg json lighting mask mat mixer mov mp3 mp4 obj ogg otf overrideController
-physicMaterial physicsMaterial2D playable png prefab preset psd renderTexture shader
-shadergraph signal spriteatlas tga terrainlayer ttf txt unity unitypackage uss uxml wav aif
-""".split())
+anim asmdef asmref asset blend compute controller cs cubemap dll exr fbx flare fontsettings
+guiskin hlsl cginc inputactions jpeg jpg json lighting mask mat mesh mixer mov mp3 mp4 obj
+ogg otf overrideController physicmaterial physicsmaterial2d playable png prefab preset psd
+rendertexture shader shadergraph signal spriteatlas tga terrainlayer tif ttf txt unity
+unitypackage uss uxml vrca wav aif
+""".lower().split())
+
+# A reverse-DNS stem is a package id, not a filename — and its last segment collides with
+# real extensions (`com.unity` ends in `.unity`, a scene extension), so the extension set
+# alone cannot tell them apart. Package ids are ordinary search traffic in a Unity project;
+# this driver's own repro probes one.
+_PACKAGE_ID = re.compile(r"^(?:com|net|org|io|dev|jp|nadena|lyuma)\.", re.IGNORECASE)
 
 
 def extension_token(pattern):
@@ -171,24 +178,27 @@ def extension_token(pattern):
     if not isinstance(pattern, str):
         return None
     for token in _TOKEN_SPLIT.split(pattern):
-        if not token or token.lower().startswith(_FILTER_TERM_PREFIXES):
+        if not token or token.lower().startswith(_FILTER_TERM_PREFIXES) \
+                or _PACKAGE_ID.match(token):
             continue
         _, dot, suffix = token.rpartition(".")
-        if dot and suffix.lower() in {e.lower() for e in _ASSET_EXTENSIONS}:
+        if dot and suffix.lower() in _ASSET_EXTENSIONS:
             return token
     return None
 
 
-def _pattern_note_text(token, had_hits):
+def _pattern_note_text(token, shown_hits):
+    # Branches on the hits actually IN this response, not on totalAssets: a page past the
+    # end carries a positive total and an empty list, where "the hits above" names nothing.
     found = (
         "the hits above matched that text inside a NAME, not by type"
-        if had_hits else
-        "this zero means no asset's NAME contains that text, not that no asset of that "
-        "type exists")
+        if shown_hits else
+        "so this result does not establish whether assets of that type exist — the term was "
+        "matched against names, and another term in the pattern may have excluded them too")
     return (
         f"[vrc-mcp-proxy] AssetDatabase.FindAssets matches an asset's name with the "
         f"extension excluded, so the \"{token}\" in search_pattern never selects by file "
-        f"type — {found}. Filter by kind with filter_type (sent to Unity as t:<Type>, e.g. "
+        f"type; {found}. Filter by kind with filter_type (sent to Unity as t:<Type>, e.g. "
         f"\"AnimatorController\"), and keep search_pattern for name fragments. Mechanism "
         f"and the measurement behind it: vrc-mcp-proxy docs/design.md, the manage_asset "
         f"search row."
@@ -207,8 +217,21 @@ def annotate_search_pattern(msg, arguments):
     data = _search_payload(msg)
     if data is None:
         return msg
-    add_note(msg, _pattern_note_text(token, data["totalAssets"] > 0))
+    shown = data.get("assets")
+    add_note(msg, _pattern_note_text(
+        token, isinstance(shown, list) and any(isinstance(a, dict) for a in shown)))
     return msg
+
+
+def wants_venue(arguments):
+    """Whether the scope note could use a resolved project root for this call.
+
+    The caller gates the (directory-globbing) venue resolution on this, so it must be true
+    for every call the note might annotate with a venue and cheap for every call it cannot.
+    A non-dict `arguments` answers False rather than raising: this runs inside the shared
+    advisory region, where a raise costs every note on the response.
+    """
+    return _is_search(arguments) and isinstance(arguments.get("path"), str)
 
 
 def _normalized_scope(path):
@@ -216,13 +239,22 @@ def _normalized_scope(path):
     return path.replace("\\", "/").rstrip("/")
 
 
-# A path naming one of these roots is destroyed by the force-prefix rather than merely
-# relocated: "Packages/com.foo" becomes "Assets/Packages/com.foo", which no venue holds.
-# A bare relative path is NOT in this class — upstream prefixing "Materials/Foo" to
-# "Assets/Materials/Foo" is the documented, working case, and treating it as a provable drop
-# would fire the note on a correct call.
-_DOOMED_ROOTS = ("packages/", "library/", "projectsettings/", "temp/", "logs/")
-_ABSOLUTE = re.compile(r"^(?:[A-Za-z]:[/\\]|/)")
+# A path naming one of these roots means a project root OUTSIDE Assets, which the force-
+# prefix relocates rather than resolves: "Packages/com.foo" is looked up as
+# "Assets/Packages/com.foo". Matched on the first segment, so a bare "Library" counts.
+#
+# Suspicion, NOT proof — which is why the caller corroborates before annotating. A venue may
+# genuinely hold `Assets/Packages/...` (NuGetForUnity puts its packages exactly there), and
+# then the prefixed path resolves and the search really is scoped. A bare relative path is
+# not even suspicious: upstream prefixing "Materials/Foo" to "Assets/Materials/Foo" is the
+# documented working case its own `path` example shows.
+_DOOMED_ROOTS = frozenset({"packages", "library", "projectsettings", "temp", "logs"})
+
+# A drive-qualified path is the one absolute form the prefix provably destroys: the colon
+# cannot appear in a folder name, so "Assets/C:/…" resolves nowhere. A LEADING SLASH is not
+# in this class — `lstrip("/")` turns "/Materials/Foo" into the same valid
+# "Assets/Materials/Foo" a bare relative path gives.
+_DRIVE_ABSOLUTE = re.compile(r"^[A-Za-z]:[/\\]")
 
 
 def _sanitized_scope(path):
@@ -240,13 +272,20 @@ def _sanitized_scope(path):
     return "Assets/" + path.lstrip("/")
 
 
-def _scope_is_doomed(path):
-    """Whether the force-prefix provably destroys this scope — decidable from the request
-    alone, with no disk read and no hit inspection."""
-    lowered = path.lower()
-    if _ABSOLUTE.match(path):
-        return True
-    return lowered.rstrip("/") == "packages" or lowered.startswith(_DOOMED_ROOTS)
+def _scope_names_a_root_outside_assets(path):
+    """Whether the scope names a project root the `Assets/` prefix relocates. SUSPICION —
+    see `_DOOMED_ROOTS`; the caller must corroborate before saying the scope was dropped."""
+    return path.lower().split("/")[0] in _DOOMED_ROOTS
+
+
+def _scope_is_provably_broken(path):
+    """Whether the sanitizer provably cannot resolve this scope, from the request alone.
+
+    Only two shapes qualify: a `..` traversal (the sanitizer returns null outright) and a
+    drive-qualified absolute path. Both are decidable with no disk read and no hits, which
+    is what lets the note fire in a venue this proxy cannot resolve.
+    """
+    return ".." in path or bool(_DRIVE_ABSOLUTE.match(path))
 
 
 def _t_shaped_path_is_normalized(path, arguments):
@@ -275,7 +314,9 @@ def _hits_outside(data, scope):
     assets = data.get("assets")
     if not isinstance(assets, list):
         return []
-    prefix = scope.lower()
+    # rstrip, because a sanitized "Assets/" (what a bare "/" scope becomes) would otherwise
+    # test `startswith("assets//")` and report every legitimate hit as outside.
+    prefix = scope.replace("\\", "/").lower().rstrip("/")
     outside = []
     for asset in assets:
         if not isinstance(asset, dict):
@@ -295,31 +336,38 @@ _SCOPE_HEAD = (
     "not a valid folder, upstream searches the WHOLE PROJECT rather than refusing, and the "
     "only warning goes to the Unity console — which this proxy denies you.")
 
-_SCOPE_TAIL_PROVABLE = (
+_SCOPE_TAIL_OUTSIDE_ASSETS = (
     " Upstream force-prefixes \"Assets/\" onto any path not already under it, so this was "
-    "looked up as \"Assets/{scope}\" — a Packages/... scope can never survive it. Scope "
-    "under Assets/, or search unscoped and read each hit's own path.")
+    "looked up as \"Assets/{scope}\" — a project root outside Assets/ cannot be reached "
+    "this way. Scope under Assets/, or search unscoped and read each hit's own path.")
 
 _SCOPE_TAIL_TRAVERSAL = (
     " A \"..\" in the path makes upstream's sanitizer return null, which fails the same "
     "way. Spell the scope as a plain Assets-relative folder.")
+
+_SCOPE_TAIL_DRIVE = (
+    " An absolute path is prefixed too, so this was looked up as \"Assets/{scope}\", which "
+    "no folder can be named. Scope with an Assets-relative path.")
 
 _SCOPE_TAIL_OUTSIDE = (
     " {n} of the hits above are outside it, so this ran project-wide — read every hit's own "
     "path rather than the scope you sent.")
 
 _SCOPE_TAIL_EMPTY = (
-    " This zero is project-wide-true, so it does not mean the folder is empty — it is not "
-    "on disk under {venue}. Fix the path before trusting an empty result.")
+    " This zero is project-wide-true, so it does not mean the folder is empty — there is no "
+    "such FOLDER under {venue} (upstream scopes by folder, so a file path fails the same "
+    "way). Fix the path before trusting an empty result.")
 
 
 def annotate_search_scope(msg, arguments, project_root=None):
-    """Append the dropped-scope note, on the first of three triggers that holds.
+    """Append the dropped-scope note, on the first trigger that holds.
 
-    Ordered by certainty, and one note per response: a provable drop (from the request
-    alone), then out-of-scope hits (from the response alone), then an empty result over a
-    folder that is not on disk (the only trigger needing the venue, and the only one that
-    can be wrong about a folder Unity considers real — see design.md's residuals).
+    Ordered by certainty, one note per response. Only the sanitizer-provable shapes fire on
+    the request alone (`..`, a drive-qualified path); a scope merely *naming* a root outside
+    Assets/ is suspicion rather than proof — `Assets/Packages/...` is a layout real venues
+    have — so it must be corroborated by the response before this says the scope was
+    dropped. That corroboration is the whole guard against the expensive failure here: a
+    confident note on a correct call.
     """
     if not _is_search(arguments):
         return msg
@@ -337,22 +385,28 @@ def annotate_search_scope(msg, arguments, project_root=None):
         # Upstream moved this query into search_pattern and scoped to "Assets" itself. The
         # call is fine; the effective scope for the hit comparison below is that "Assets".
         effective = "Assets"
-    elif _scope_is_doomed(scope):
-        add_note(msg, _SCOPE_HEAD.format(scope=scope)
-                 + _SCOPE_TAIL_PROVABLE.format(scope=scope.lstrip("/")))
+    elif _scope_is_provably_broken(scope):
+        tail = (_SCOPE_TAIL_TRAVERSAL if ".." in scope
+                else _SCOPE_TAIL_DRIVE.format(scope=scope))
+        add_note(msg, _SCOPE_HEAD.format(scope=scope) + tail)
         return msg
     else:
         effective = _sanitized_scope(scope)
-        if effective is None:
-            add_note(msg, _SCOPE_HEAD.format(scope=scope) + _SCOPE_TAIL_TRAVERSAL)
-            return msg
 
-    if outside := _hits_outside(data, effective):
-        tail = _SCOPE_TAIL_OUTSIDE.format(n=len(outside))
-    elif data["totalAssets"] == 0 and _folder_is_absent(effective, project_root):
-        tail = _SCOPE_TAIL_EMPTY.format(venue=project_root)
-    else:
+    outside = _hits_outside(data, effective)
+    empty_over_nothing = (data["totalAssets"] == 0
+                          and _folder_is_absent(effective, project_root))
+    if not outside and not empty_over_nothing:
         return msg
+    if _scope_names_a_root_outside_assets(scope):
+        # Corroborated: the scope named a root outside Assets/ AND the response bears out
+        # that it was not honored. Naming the mechanism is what makes this actionable —
+        # without it the reader retypes the same Packages/ path.
+        tail = _SCOPE_TAIL_OUTSIDE_ASSETS.format(scope=scope.lstrip("/"))
+    elif outside:
+        tail = _SCOPE_TAIL_OUTSIDE.format(n=len(outside))
+    else:
+        tail = _SCOPE_TAIL_EMPTY.format(venue=project_root)
     add_note(msg, _SCOPE_HEAD.format(scope=scope) + tail)
     return msg
 

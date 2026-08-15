@@ -646,18 +646,22 @@ class Proxy:
                 # request-only check to a filesystem read.
                 if self.cfg.get("manage_asset_search_pattern_note", True):
                     msg = manage_asset.annotate_search_pattern(msg, args)
-                if self.cfg.get("manage_asset_search_scope_note", True):
-                    # Resolve through this CALL's own routing — a per-call `unity_instance`
-                    # first, then the session pin as of request time. `proxy_project_root`'s
-                    # `(requested_instance, None)` shape is the set_active_instance response
-                    # and would read a session-pinned venue as unpinned here.
+                if self.cfg.get("manage_asset_search_scope_note", True) \
+                        and manage_asset.wants_venue(args):
+                    # Resolved INSIDE the gate: this globs the heartbeat directory and parses
+                    # every status file, and only a scoped `search` reads the result — a
+                    # get_info or create_folder response would pay it for nothing. Routing is
+                    # this CALL's own: a per-call `unity_instance` first, then the session pin
+                    # as of request time. (`proxy_project_root`'s `(requested_instance, None)`
+                    # shape belongs to the set_active_instance response and would read a
+                    # session-pinned venue as unpinned here.)
                     msg = manage_asset.annotate_search_scope(
                         msg, args, project_root=instances.resolve_project_root(
-                            (args or {}).get("unity_instance"), info.get("active")))
+                            args.get("unity_instance"), info.get("active")))
             if self.cfg.get("instance_not_found_note", True):
-                # Reads the heartbeat directory, so it is the one note here that can raise on
-                # a filesystem fault — and this region is SHARED, so a raise costs every note
-                # on the response, not just this one. `instances.read_heartbeats` already
+                # Reads the heartbeat directory, as the scope note above now does too — and
+                # this region is SHARED, so a raise costs every note on the response, not
+                # just the one that raised. `instances.read_heartbeats` already
                 # swallows per-file errors, and `instance_note` reads `info` with `.get`
                 # throughout (the watchdog tombstone carries none of these keys).
                 msg = instance_note.annotate(

@@ -336,15 +336,28 @@ def main():
     # (`Name.ext` finds nothing) passes under a GLOB matcher too — the model this row's
     # measurement falsified. The fixture's stem carries a dot of its own, which is what
     # makes the other two discriminating.
-    c.call_tool("execute_code", {"action": "execute", "code": (
-        'UnityEditor.AssetDatabase.CreateAsset('
-        'new UnityEngine.Material(UnityEngine.Shader.Find("Standard")), '
-        '"Assets/A10Repro/alpha.beta.mat");\n'
-        'UnityEditor.AssetDatabase.SaveAssets();\nreturn "ok";')}, timeout=120)
+    try:
+        c.call_tool("execute_code", {"action": "execute", "code": (
+            'UnityEditor.AssetDatabase.CreateAsset('
+            'new UnityEngine.Material(UnityEngine.Shader.Find("Standard")), '
+            '"Assets/A10Repro/alpha.beta.mat");\n'
+            'UnityEditor.AssetDatabase.SaveAssets();\nreturn "ok";')}, timeout=120)
+    except TimeoutError:
+        pass  # the `forward` probe below is the fixture gate; it reports INCONCLUSIVE.
 
     def _total(pattern, path="Assets/A10Repro"):
-        got = c.call_tool("manage_asset", {"action": "search", "path": path,
-                                           "search_pattern": pattern}, timeout=90)
+        """Hit count, or None where the probe itself failed to answer.
+
+        Catches TimeoutError like every other risky call site here (`_wait_until_responsive`
+        names the failure): these run right after two probes that deliberately block the
+        editor's main thread, and an escape would skip `_finish` — leaving Assets/A10Repro
+        in the venue and losing the G22 and F22 verdicts already measured.
+        """
+        try:
+            got = c.call_tool("manage_asset", {"action": "search", "path": path,
+                                               "search_pattern": pattern}, timeout=90)
+        except TimeoutError:
+            return None
         try:
             return got["payload"]["data"]["totalAssets"]
         except (KeyError, TypeError):
@@ -355,17 +368,27 @@ def main():
     # and the `*` form matches only if `*` splits rather than globbing.
     forward, with_ext = _total("alpha.beta"), _total("alpha.beta.mat")
     reversed_, starred = _total("beta.alpha"), _total("beta*alpha")
-    if forward:
-        verdict = ("REPRODUCED" if with_ext == 0 and reversed_ == 0 and starred
-                   else "NOT-REPRODUCED")
-    else:
+    # Three outcomes, deliberately separated. A probe that failed to answer must not read as
+    # a fix (F22's fixture gate is the precedent: "a correct verdict on a broken fixture …
+    # reads exactly like upstream fixed the lie"), and a DIFFERENT wrong matcher must not
+    # either — a dot-splitting or globbing matcher keeps the trap alive in a new shape while
+    # the headline probe still reports 0, so only `with_ext` finding the asset retires the
+    # note.
+    if None in (forward, with_ext, reversed_, starred) or not forward:
         verdict = "INCONCLUSIVE"
+    elif with_ext > 0:
+        verdict = "NOT-REPRODUCED"
+    elif reversed_ or not starred:
+        verdict = "CHECK-MANUALLY"
+    else:
+        verdict = "REPRODUCED"
     record("F23b-extension-excluded-from-name-match", verdict,
            f"'alpha.beta'={forward} (fixture visible) 'alpha.beta.mat'={with_ext} "
            f"(0 => extension excluded from the match) 'beta.alpha'={reversed_} "
            f"(0 => `.` is matched literally, not a separator) 'beta*alpha'={starred} "
            f"(>0 => `*` is a SEPARATOR, not a wildcard). "
-           f"Retire manage_asset_search_pattern_note only when 'alpha.beta.mat' finds it.")
+           f"Retire manage_asset_search_pattern_note only on NOT-REPRODUCED — "
+           f"CHECK-MANUALLY means the matcher changed but the trap is still live.")
 
     # -- F23c: is a scope path that is not a valid folder still dropped? --
     # Independently retirable from F23b: different mechanism (argument resolution, not name
@@ -374,8 +397,13 @@ def main():
     # prefix destroys.
     missing = _total("alpha.beta", path="Assets/A10Repro__nope")
     packaged = _total("alpha.beta", path="Packages/com.unity.ide.rider")
-    record("F23c-scope-path-dropped",
-           "REPRODUCED" if (missing or 0) > 0 or (packaged or 0) > 0 else "NOT-REPRODUCED",
+    # Same fixture as F23b and the same discipline: a probe that could not answer, or a
+    # fixture that never landed, is INCONCLUSIVE — never "upstream honors the scope now".
+    if not forward or None in (missing, packaged):
+        scope_verdict = "INCONCLUSIVE"
+    else:
+        scope_verdict = "REPRODUCED" if (missing > 0 or packaged > 0) else "NOT-REPRODUCED"
+    record("F23c-scope-path-dropped", scope_verdict,
            f"hits under a nonexistent scope={missing}, under a Packages/ scope={packaged} "
            f"(>0 on either => the scope was dropped and the search went project-wide; "
            f"both 0 => upstream now honors or refuses the scope)")
