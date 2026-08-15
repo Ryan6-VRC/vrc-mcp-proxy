@@ -393,6 +393,29 @@ _TYPE_IN_VALUE_POSITION = ("is a type, which is not valid in the given context",
 # annotating a different error with the wrong note.
 _UNRESOLVED_NAME = "does not exist in the current context"
 
+# A member that does not exist on a type that does (CS1061). Unlike the three keys above, the
+# suffix alone is NOT the key: compile_notes' docstring records that a CodeDom ambiguity
+# cascades into this same phrase, so keying on it bare would annotate `System.Random' does not
+# contain a definition for `Range' with a note about tool doors.
+#
+# The receiver has to be one of ours — but it cannot be recognised from the ERROR text, because
+# the two compilers disagree about what a receiver even looks like. Roslyn formats types with
+# CSharpErrorMessageFormat, which drops the namespace no matter how the caller qualified the
+# call ('ReportConsole' …), while CodeDom keeps it (`Ryan6Vrc.AgentTools.Editor.ReportConsole' …).
+# Every pre-existing ROSLYN_* fixture in the tests shows the bare form. So a namespace test
+# against the error would be dead on the default compiler — most of the traffic.
+#
+# The CALLER's own text settles it instead: the snippet is available here, and the docs
+# prescribe the fully-qualified form, so a kit class is one the snippet itself dereferenced
+# through `Ryan6Vrc.<Kit>.Editor.`. Match the error's receiver by its LAST segment against that
+# set, which is dialect-proof in both directions. `replay` carries no snippet; there the
+# qualified receiver is all there is, so the note fires only on the CodeDom rendering.
+# Both quote dialects, as elsewhere here: roslyn 'X', codedom `X'.
+_NO_SUCH_MEMBER = re.compile(
+    r"[`'\"]?([\w.]+)['\"]? does not contain a definition for [`'\"]?(\w+)")
+# The lookbehind stops `NotRyan6Vrc.AvatarTools.Editor.Widget` reading as ours.
+_KIT_CALL = re.compile(r"(?<![\w])Ryan6V[Rr][Cc]\.\w+\.Editor\.(\w+)\s*\.")
+
 AMBIGUITY_NOTE_TEXT = (
     "[vrc-mcp-proxy] that ambiguity is execute_code's own: it pre-imports six namespaces "
     "together, so a name two of them both define resolves to neither. The error above "
@@ -410,8 +433,18 @@ AMBIGUITY_NOTE_TEXT = (
 #
 # The tool doors lead the namespace list on measured frequency, not tidiness: the commonest
 # unresolved name in this workspace's traffic is a bare agent-tools/avatar-tools call
-# (`return ReportConsole.Read(5);` -> "The name `ReportConsole' does not exist"), not
+# (`return ReportConsole.Run(5);` -> "The name `ReportConsole' does not exist"), not
 # EditorSceneManager. USING_REFUSAL_TEXT already names them for the same reason.
+NO_SUCH_MEMBER_NOTE_TEXT = (
+    "[vrc-mcp-proxy] the type resolved; the member did not. On the agent/avatar tool kits "
+    "**the primary door is always `Run`** — the class name carries the verb, so the door never "
+    "repeats it (`ReportGimmick.Run`, `CompileController.Run`, `CheckSeam.Run`). A member with "
+    "its own name is a secondary with its own subject (`CheckSeam.CheckBare`, "
+    "`RenderAvatar.CaptureDiff`, `ImportPackage.Verify`), never a primary to guess at. Read the "
+    "door's row in atelier docs/unity-tools.md, which carries one literal call per door; the "
+    "declaration site is canon."
+)
+
 UNRESOLVED_NAME_NOTE_TEXT = (
     "[vrc-mcp-proxy] that name did not resolve. The two common causes here fire identically, "
     "so check them in order. (1) A type outside execute_code's six pre-imported namespaces "
@@ -469,7 +502,25 @@ def _compile_error_lines(payload):
     return [str(e) for e in data["errors"] if _ERROR_LINE.match(str(e))]
 
 
-def compile_notes(errors):
+def _kit_member_miss(errors, code):
+    """True when a CS1061 names a member missing on a class the SNIPPET called as a kit door.
+
+    `code` is None on `replay`; the qualified receiver is then the only evidence available.
+    """
+    kit = set(_KIT_CALL.findall(code or ""))
+    for e in errors:
+        m = _NO_SUCH_MEMBER.search(e)
+        if not m:
+            continue
+        receiver = m.group(1)
+        if receiver.split(".")[-1] in kit:
+            return True
+        if code is None and _KIT_CALL.search(receiver + "."):
+            return True
+    return False
+
+
+def compile_notes(errors, code=None):
     """The trap notes earned by a list of compile-error strings, in a stable order.
 
     One note per distinct trap, never per matching line: one mistake yields two errors on
@@ -491,6 +542,8 @@ def compile_notes(errors):
         notes.append(TYPE_IN_VALUE_POSITION_NOTE_TEXT)
     if any(_UNRESOLVED_NAME in e for e in errors):
         notes.append(UNRESOLVED_NAME_NOTE_TEXT)
+    if _kit_member_miss(errors, code):
+        notes.append(NO_SUCH_MEMBER_NOTE_TEXT)
     return notes
 
 
@@ -538,7 +591,8 @@ def annotate(msg, arguments, cfg, prelude_lines=0):
         errors = _compile_error_lines(json.loads(text))
     except (json.JSONDecodeError, TypeError, ValueError):
         return msg
-    notes = compile_notes(errors) if cfg.get("execute_code_compile_notes", True) else []
+    notes = (compile_notes(errors, arguments.get("code"))
+             if cfg.get("execute_code_compile_notes", True) else [])
     if cfg.get("execute_code_prelude_offset_note", True):
         offset = prelude_note(errors, prelude_lines,
                               wrapped=cfg.get("execute_code_idempotency_guard", True))
