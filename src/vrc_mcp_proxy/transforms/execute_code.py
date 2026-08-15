@@ -393,6 +393,17 @@ _TYPE_IN_VALUE_POSITION = ("is a type, which is not valid in the given context",
 # annotating a different error with the wrong note.
 _UNRESOLVED_NAME = "does not exist in the current context"
 
+# A member that does not exist on a type that does (CS1061). Unlike the three keys above, the
+# suffix alone is NOT the key: compile_notes' docstring records that a CodeDom ambiguity
+# cascades into this same phrase, so keying on it bare would annotate `System.Random' does not
+# contain a definition for `Range' with a note about tool doors. The receiver has to be one of
+# ours, so the type is matched too — and only the qualified form, which is the form the docs
+# prescribe and the only one that identifies the kit rather than guessing at a bare name.
+# Both quote dialects, as elsewhere here: roslyn 'X', codedom `X'.
+_NO_SUCH_MEMBER = re.compile(
+    r"[`'\"]?((?:\w+\.)*Ryan6V[Rr][Cc](?:\.\w+)*)['\"]?"
+    r" does not contain a definition for [`'\"]?(\w+)")
+
 AMBIGUITY_NOTE_TEXT = (
     "[vrc-mcp-proxy] that ambiguity is execute_code's own: it pre-imports six namespaces "
     "together, so a name two of them both define resolves to neither. The error above "
@@ -410,8 +421,18 @@ AMBIGUITY_NOTE_TEXT = (
 #
 # The tool doors lead the namespace list on measured frequency, not tidiness: the commonest
 # unresolved name in this workspace's traffic is a bare agent-tools/avatar-tools call
-# (`return ReportConsole.Read(5);` -> "The name `ReportConsole' does not exist"), not
+# (`return ReportConsole.Run(5);` -> "The name `ReportConsole' does not exist"), not
 # EditorSceneManager. USING_REFUSAL_TEXT already names them for the same reason.
+NO_SUCH_MEMBER_NOTE_TEXT = (
+    "[vrc-mcp-proxy] the type resolved; the member did not. On the agent/avatar tool kits "
+    "**the primary door is always `Run`** — the class name carries the verb, so the door never "
+    "repeats it (`ReportGimmick.Run`, `CompileController.Run`, `CheckSeam.Run`). A member with "
+    "its own name is a secondary with its own subject (`CheckSeam.CheckBare`, "
+    "`RenderAvatar.CaptureDiff`, `ImportPackage.Verify`), never a primary to guess at. Read the "
+    "door's row in atelier docs/unity-tools.md, which carries one literal call per door; the "
+    "declaration site is canon."
+)
+
 UNRESOLVED_NAME_NOTE_TEXT = (
     "[vrc-mcp-proxy] that name did not resolve. The two common causes here fire identically, "
     "so check them in order. (1) A type outside execute_code's six pre-imported namespaces "
@@ -491,6 +512,8 @@ def compile_notes(errors):
         notes.append(TYPE_IN_VALUE_POSITION_NOTE_TEXT)
     if any(_UNRESOLVED_NAME in e for e in errors):
         notes.append(UNRESOLVED_NAME_NOTE_TEXT)
+    if any(_NO_SUCH_MEMBER.search(e) for e in errors):
+        notes.append(NO_SUCH_MEMBER_NOTE_TEXT)
     return notes
 
 

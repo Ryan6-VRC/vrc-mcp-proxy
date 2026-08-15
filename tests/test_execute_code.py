@@ -485,6 +485,28 @@ def test_type_in_value_position_note_fires_on_both_dialects():
         assert ec.compile_notes(errors) == [ec.TYPE_IN_VALUE_POSITION_NOTE_TEXT], errors
 
 
+ROSLYN_NO_SUCH_MEMBER = [
+    "Line 1: 'Ryan6Vrc.AvatarTools.Editor.CompileController' does not contain a definition "
+    "for 'Compile'"]
+CODEDOM_NO_SUCH_MEMBER = [
+    "Line 1: `Ryan6Vrc.AgentTools.Editor.ReportConsole' does not contain a definition for "
+    "`Report'"]
+# The cascade compile_notes' docstring records: an ambiguity resolving to System.Random, which
+# carries the same suffix and must NOT earn a note about tool doors.
+CODEDOM_AMBIGUITY_CASCADE = [
+    "Line 1: `System.Random' does not contain a definition for `Range'"]
+
+
+def test_no_such_member_note_fires_on_both_dialects():
+    for errors in (ROSLYN_NO_SUCH_MEMBER, CODEDOM_NO_SUCH_MEMBER):
+        assert ec.compile_notes(errors) == [ec.NO_SUCH_MEMBER_NOTE_TEXT], errors
+
+
+def test_no_such_member_note_does_not_fire_on_a_foreign_receiver():
+    # Keying on the suffix alone would annotate this with a note about our door names.
+    assert ec.compile_notes(CODEDOM_AMBIGUITY_CASCADE) == []
+
+
 def test_one_note_per_trap_not_per_matching_line():
     # Both codedom fixtures carry TWO error lines for ONE mistake; two identical notes
     # would read as two problems.

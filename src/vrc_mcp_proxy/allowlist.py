@@ -51,7 +51,7 @@ _REDIRECTS = {
         "console entry, so any multi-line diagnostic (a VRCFury warning naming each offending "
         "path, an NDMF or optimizer report) silently loses its payload. Use the owned door "
         "instead, which reads UnityEditor.LogEntries directly and returns every line:\n"
-        "  execute_code: return Ryan6Vrc.AgentTools.Editor.ReportConsole.Report("
+        "  execute_code: return Ryan6Vrc.AgentTools.Editor.ReportConsole.Run("
         "types: \"error,warning\", filterText: null, count: 20);\n"
         "Contract: atelier docs/unity-tools.md §Inspection & reporting.\n"
         "To CLEAR the console: UnityEditor.LogEntries is internal, so it has to be reached by "
