@@ -485,26 +485,46 @@ def test_type_in_value_position_note_fires_on_both_dialects():
         assert ec.compile_notes(errors) == [ec.TYPE_IN_VALUE_POSITION_NOTE_TEXT], errors
 
 
+# Roslyn formats the receiver with CSharpErrorMessageFormat, which DROPS the namespace
+# however the caller qualified the call — so this bare shape is what the default compiler
+# actually emits, and every other ROSLYN_* fixture above renders its type bare too.
 ROSLYN_NO_SUCH_MEMBER = [
-    "Line 1: 'Ryan6Vrc.AvatarTools.Editor.CompileController' does not contain a definition "
-    "for 'Compile'"]
+    "Line 1: 'ReportConsole' does not contain a definition for 'Report'"]
 CODEDOM_NO_SUCH_MEMBER = [
     "Line 1: `Ryan6Vrc.AgentTools.Editor.ReportConsole' does not contain a definition for "
     "`Report'"]
-# The cascade compile_notes' docstring records: an ambiguity resolving to System.Random, which
+KIT_SNIPPET = 'return Ryan6Vrc.AgentTools.Editor.ReportConsole.Report(count: 5);'
+# The cascade compile_notes' docstring records: an ambiguity resolving to System.Random
 # carries the same suffix and must NOT earn a note about tool doors.
 CODEDOM_AMBIGUITY_CASCADE = [
     "Line 1: `System.Random' does not contain a definition for `Range'"]
 
 
 def test_no_such_member_note_fires_on_both_dialects():
+    # The caller's own qualification is the evidence, so the bare Roslyn receiver resolves
+    # by its last segment. Keying on the namespace in the ERROR would miss this one — the
+    # default compiler, and most of the traffic.
     for errors in (ROSLYN_NO_SUCH_MEMBER, CODEDOM_NO_SUCH_MEMBER):
-        assert ec.compile_notes(errors) == [ec.NO_SUCH_MEMBER_NOTE_TEXT], errors
+        assert ec.compile_notes(errors, KIT_SNIPPET) == [ec.NO_SUCH_MEMBER_NOTE_TEXT], errors
 
 
 def test_no_such_member_note_does_not_fire_on_a_foreign_receiver():
     # Keying on the suffix alone would annotate this with a note about our door names.
-    assert ec.compile_notes(CODEDOM_AMBIGUITY_CASCADE) == []
+    assert ec.compile_notes(CODEDOM_AMBIGUITY_CASCADE, KIT_SNIPPET) == []
+
+
+def test_no_such_member_note_ignores_a_lookalike_namespace():
+    assert ec.compile_notes(
+        ["Line 1: `NotRyan6Vrc.AvatarTools.Editor.Widget' does not contain a definition for "
+         "`Run'"],
+        "return NotRyan6Vrc.AvatarTools.Editor.Widget.Run();") == []
+
+
+def test_no_such_member_note_on_replay_has_only_the_qualified_receiver():
+    # `replay` carries no snippet. The CodeDom rendering still identifies the kit; the bare
+    # Roslyn one cannot, and the note stays silent rather than guessing.
+    assert ec.compile_notes(CODEDOM_NO_SUCH_MEMBER, None) == [ec.NO_SUCH_MEMBER_NOTE_TEXT]
+    assert ec.compile_notes(ROSLYN_NO_SUCH_MEMBER, None) == []
 
 
 def test_one_note_per_trap_not_per_matching_line():
