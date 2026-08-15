@@ -31,6 +31,7 @@ BEHAVIORS = (
     "manage_gameobject_inactive_note",
     "execute_code_safety_off",
     "manage_scene_arg_guard",
+    "manage_scene_discard_guard",
     "manage_camera_screenshot_output",
     "execute_code_venue_guard",
     # Two keys, not one: the trap notes answer to upstream COMPILER prose, the offset note

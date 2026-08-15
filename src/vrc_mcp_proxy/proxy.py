@@ -428,11 +428,23 @@ class Proxy:
             # and green in every unit test, which all sit in it.
             if isinstance(payload, dict) and payload.get("action") == "execute":
                 prelude_lines = execute_code.prelude_line_count(self.cfg, venue)
-        elif name == "manage_scene" and self.cfg.get("manage_scene_arg_guard", True):
-            refusal = manage_scene.refusal_for(arguments)
-            if refusal is not None:
-                self._write_terminal(tool_error_result(req_id, refusal))
-                return
+        elif name == "manage_scene":
+            # Two guards, two keys: the misdirected-argument guard answers to upstream's flat
+            # argument set, the discard guard to its Single-mode scene handling. F7 — one switch
+            # must not carry two behaviors, so neither key may sit on the branch condition.
+            if self.cfg.get("manage_scene_arg_guard", True):
+                refusal = manage_scene.refusal_for(arguments)
+                if refusal is not None:
+                    self._write_terminal(tool_error_result(req_id, refusal))
+                    return
+            if self.cfg.get("manage_scene_discard_guard", True):
+                refusal = manage_scene.discard_refusal_for(arguments)
+                if refusal is not None:
+                    self._write_terminal(tool_error_result(req_id, refusal))
+                    return
+                # Only once the call is cleared to forward: `additive` on 'create' is this
+                # guard's confirm token, and upstream would bind it and never read it.
+                arguments = manage_scene.strip_proxy_only_args(arguments)
         elif name == "manage_asset" and self.cfg.get("manage_asset_mutation_guard", True):
             refusal = manage_asset.refusal_for(arguments)
             if refusal is not None:
