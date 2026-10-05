@@ -62,7 +62,7 @@ def test_guard_wraps_snippets_containing_yield_and_await():
 
 
 def test_guard_wraps_nested_bare_return_snippet():
-    # Measured live (Plum-Remy@6401, 2026-07-16): this exact shape is legal C#, runs fine,
+    # Measured live (a venue Editor on port 6401, 2026-07-16): this exact shape is legal C#, runs fine,
     # and was forwarded UNGUARDED because _BARE_RETURN matched the nested `return;`.
     # A build snippet carrying a helper lambda like this is what storms 6x behind a modal.
     code = "System.Action f = () => { if (x) return; };\nf();\nreturn 1;"
